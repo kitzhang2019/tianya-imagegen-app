@@ -15,10 +15,12 @@ import {
 import {
   STAGE_LABELS,
   deleteJob,
+  ensureThumbnails,
   getAdminPassword,
   getImageSrc,
   getJobs,
   getSettings,
+  getThumbSrc,
   initJobs,
   maskSecret,
   onJobsChange,
@@ -257,7 +259,7 @@ function renderJobs() {
       const label = STAGE_LABELS[job.stage] || job.stage;
       const done = job.status === "done";
       const failed = job.status === "failed";
-      const src = done ? getImageSrc(job) : null;
+      const src = done ? getThumbSrc(job) : null;
       const snippet = esc(job.prompt.length > 60 ? job.prompt.slice(0, 60) + "…" : job.prompt);
       const galleryLine =
         done && job.galleryPushed === true
@@ -291,7 +293,7 @@ function renderGallery() {
   galleryEmptyEl.hidden = done.length > 0;
   galleryGridEl.innerHTML = done
     .map((job) => {
-      const src = getImageSrc(job);
+      const src = getThumbSrc(job);
       const pushed = job.galleryPushed === true;
       const selected = selectedGalleryIds.has(job.id);
       return `<figure class="g-tile${gallerySelectMode ? " select-mode" : ""}${selected ? " selected" : ""}" data-id="${job.id}">
@@ -353,7 +355,11 @@ function switchTab(name) {
     b.classList.toggle("active", b.dataset.tab === name);
   });
   if (prev === "settings" && name !== "settings") lockSettings();
-  if (name === "gallery") renderGallery();
+  if (name === "gallery") {
+    renderGallery();
+    // 老图补 WebP 缩略图（后台跑，补完自动刷新网格）
+    ensureThumbnails().then(renderGallery).catch(() => {});
+  }
   if (name === "settings") renderSettings();
   window.scrollTo({ top: 0 });
 }
@@ -406,6 +412,7 @@ function openResult(jobId) {
     return;
   }
   currentResultJobId = jobId;
+  resetZoom();
   $("result-img").src = src;
   $("result-title").textContent = `${MODEL_LABELS[job.model] ?? job.model} · ${job.width}×${job.height}`;
   $("result-meta").textContent = `种子 ${job.seed} · ${new Date(job.finishedAt || job.createdAt).toLocaleString()}`;
@@ -423,7 +430,109 @@ function openResult(jobId) {
 function closeResult() {
   $("result-view").hidden = true;
   currentResultJobId = null;
+  resetZoom();
 }
+
+// ---------- 大图捏合缩放（双指缩放 1x-4x、放大后单指拖动、双击切换 1x/2.5x） ----------
+const resultImg = $("result-img");
+let zoomScale = 1;
+let zoomX = 0;
+let zoomY = 0;
+const zoomPointers = new Map();
+let zoomStartDist = 0;
+let zoomStartScale = 1;
+let zoomMoved = false;
+let zoomSuppressClick = false;
+let resultClickTimer = null;
+
+function applyZoom() {
+  resultImg.style.transform = `translate(${zoomX}px, ${zoomY}px) scale(${zoomScale})`;
+}
+
+function resetZoom() {
+  zoomScale = 1;
+  zoomX = 0;
+  zoomY = 0;
+  zoomPointers.clear();
+  zoomMoved = false;
+  zoomSuppressClick = false;
+  if (resultClickTimer) {
+    clearTimeout(resultClickTimer);
+    resultClickTimer = null;
+  }
+  resultImg.style.transform = "";
+}
+
+resultImg.addEventListener("pointerdown", (e) => {
+  resultImg.setPointerCapture(e.pointerId);
+  zoomPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (zoomPointers.size === 2) {
+    const [a, b] = [...zoomPointers.values()];
+    zoomStartDist = Math.hypot(a.x - b.x, a.y - b.y);
+    zoomStartScale = zoomScale;
+  }
+});
+
+resultImg.addEventListener("pointermove", (e) => {
+  if (!zoomPointers.has(e.pointerId)) return;
+  const prev = zoomPointers.get(e.pointerId);
+  zoomPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (Math.abs(e.clientX - prev.x) + Math.abs(e.clientY - prev.y) > 2) zoomMoved = true;
+  if (zoomPointers.size === 2) {
+    const [a, b] = [...zoomPointers.values()];
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    if (zoomStartDist > 0) {
+      zoomScale = Math.min(4, Math.max(1, zoomStartScale * (dist / zoomStartDist)));
+      if (zoomScale === 1) {
+        zoomX = 0;
+        zoomY = 0;
+      }
+      applyZoom();
+    }
+    zoomSuppressClick = true;
+  } else if (zoomPointers.size === 1 && zoomScale > 1) {
+    zoomX += e.clientX - prev.x;
+    zoomY += e.clientY - prev.y;
+    applyZoom();
+    zoomSuppressClick = true;
+  }
+});
+
+function zoomEndPointer(e) {
+  zoomPointers.delete(e.pointerId);
+  if (zoomPointers.size === 0) {
+    if (zoomMoved) {
+      zoomSuppressClick = true;
+      setTimeout(() => {
+        zoomSuppressClick = false;
+      }, 300);
+    }
+    zoomMoved = false;
+    zoomStartDist = 0;
+  }
+}
+
+resultImg.addEventListener("pointerup", zoomEndPointer);
+resultImg.addEventListener("pointercancel", zoomEndPointer);
+
+resultImg.addEventListener("dblclick", () => {
+  if (resultClickTimer) {
+    clearTimeout(resultClickTimer);
+    resultClickTimer = null;
+  }
+  if (zoomScale > 1) {
+    resetZoom();
+  } else {
+    zoomScale = 2.5;
+    zoomX = 0;
+    zoomY = 0;
+    applyZoom();
+  }
+  zoomSuppressClick = true;
+  setTimeout(() => {
+    zoomSuppressClick = false;
+  }, 300);
+});
 
 /** 分享/保存到相册（单张或多张）：把本机图片拷到 Cache，再用系统分享单发出去。 */
 async function shareJobs(jobIds, action) {
@@ -629,7 +738,15 @@ $("btn-gallery-push").addEventListener("click", async () => {
 });
 
 $("result-close").addEventListener("click", closeResult);
-$("result-img").addEventListener("click", closeResult);
+// 点一下图关闭；双击是缩放，所以单击要等 260ms 确认不是双击
+resultImg.addEventListener("click", () => {
+  if (zoomSuppressClick) return;
+  if (resultClickTimer) return;
+  resultClickTimer = setTimeout(() => {
+    resultClickTimer = null;
+    if (!zoomSuppressClick) closeResult();
+  }, 260);
+});
 $("btn-save").addEventListener("click", () => shareCurrentFile("save"));
 $("btn-share").addEventListener("click", () => shareCurrentFile("share"));
 

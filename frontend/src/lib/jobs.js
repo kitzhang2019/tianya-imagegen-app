@@ -93,6 +93,9 @@ let inited = false;
 
 const listeners = new Set();
 const blobUrls = new Map(); // jobId -> Blob URL（内存里，供立即展示）
+const thumbBlobUrls = new Map(); // jobId -> 缩略图 Blob URL（内存里，供图库网格展示）
+const THUMB_MAX = 480; // 缩略图最长边
+const THUMB_QUALITY = 0.8; // WebP 缩略图质量
 const busyJobs = new Set(); // 正在执行某一步的 jobId，避免轮询重入
 const verifyingJobs = new Set(); // 正在核实 kernel 的 jobId
 
@@ -125,6 +128,77 @@ export function getImageSrc(job) {
   if (mem) return mem;
   if (job.imagePath) return Capacitor.convertFileSrc(job.imagePath);
   return null;
+}
+
+/** 图库网格用的 WebP 缩略图地址；还没缩略图时先用原图顶着。 */
+export function getThumbSrc(job) {
+  if (!job) return null;
+  const mem = thumbBlobUrls.get(job.id);
+  if (mem) return mem;
+  if (job.thumbPath) return Capacitor.convertFileSrc(job.thumbPath);
+  return getImageSrc(job);
+}
+
+function thumbFileNameFor(imageFileName) {
+  return String(imageFileName || "").replace(/\.png$/i, "-thumb.webp");
+}
+
+/** 用 canvas 把 PNG bytes 转成 WebP 缩略图（最长边 480px），返回 WebP bytes；失败返回 null。 */
+async function makeThumbBytes(pngBytes) {
+  try {
+    const blob = new Blob([pngBytes], { type: "image/png" });
+    const bmp = await createImageBitmap(blob);
+    const scale = Math.min(1, THUMB_MAX / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale));
+    const h = Math.max(1, Math.round(bmp.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext("2d").drawImage(bmp, 0, 0, w, h);
+    bmp.close();
+    const out = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", THUMB_QUALITY));
+    if (!out) return null;
+    return new Uint8Array(await out.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+/** 给一条已完成任务生成并保存 WebP 缩略图（失败不抛错，只返回 false）。 */
+async function buildThumbnail(job, pngBytes) {
+  if (!job || !job.imageFileName) return false;
+  try {
+    let bytes = pngBytes;
+    if (!bytes) {
+      const { data } = await Filesystem.readFile({ path: `images/${job.imageFileName}`, directory: Directory.Data });
+      bytes = base64ToBytes(data);
+    }
+    const thumb = await makeThumbBytes(bytes);
+    if (!thumb) return false;
+    const thumbFileName = thumbFileNameFor(job.imageFileName);
+    await Filesystem.writeFile({
+      path: `images/${thumbFileName}`,
+      data: bytesToBase64(thumb),
+      directory: Directory.Data,
+      recursive: true,
+    });
+    const uri = await Filesystem.getUri({ path: `images/${thumbFileName}`, directory: Directory.Data });
+    thumbBlobUrls.set(job.id, URL.createObjectURL(new Blob([thumb], { type: "image/webp" })));
+    job.thumbFileName = thumbFileName;
+    job.thumbPath = uri.uri;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 给所有已完成但还没缩略图的任务补缩略图（打开图库时调用，老图也能用上）。 */
+export async function ensureThumbnails() {
+  for (const job of jobs) {
+    if (job.status !== "done" || !job.imageFileName || job.thumbFileName) continue;
+    const ok = await buildThumbnail(job);
+    if (ok) await saveJobs();
+  }
 }
 
 async function saveJobs() {
@@ -291,11 +365,23 @@ export async function deleteJob(id) {
     } catch {
       // 文件删不掉不影响记录删除
     }
+    if (job.thumbFileName) {
+      try {
+        await Filesystem.deleteFile({ path: `images/${job.thumbFileName}`, directory: Directory.Data });
+      } catch {
+        // 缩略图删不掉不影响
+      }
+    }
   }
   const url = blobUrls.get(id);
   if (url) {
     URL.revokeObjectURL(url);
     blobUrls.delete(id);
+  }
+  const thumbUrl = thumbBlobUrls.get(id);
+  if (thumbUrl) {
+    URL.revokeObjectURL(thumbUrl);
+    thumbBlobUrls.delete(id);
   }
   pumpQueue();
 }
@@ -513,6 +599,10 @@ async function finishJob(job, url = null) {
     });
     const uri = await Filesystem.getUri({ path: `images/${job.imageFileName}`, directory: Directory.Data });
     blobUrls.set(job.id, URL.createObjectURL(new Blob([bytes], { type: "image/png" })));
+
+    // 图库网格用的 WebP 缩略图（失败不影响出图）
+    const doneJob = jobs.find((j) => j.id === job.id) || job;
+    await buildThumbnail(doneJob, bytes);
 
     updateJob(job.id, {
       status: "done",
