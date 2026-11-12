@@ -1,0 +1,145 @@
+# Build Android debug APK (Capacitor) — GitHub Actions
+#
+# What this does:
+#   1. Checks out the repo, sets up Node 22, JDK 21 and the Android SDK.
+#   2. Installs frontend deps and builds the Vite web app.
+#      (No backend URL is injected: this app calls the Kaggle API
+#      directly from the phone via Capacitor's native HTTP.)
+#   3. Scaffolds the Capacitor Android project if `frontend/android/` is
+#      absent (`npx cap add android`), then `npx cap sync android`.
+#   4. Builds a debug APK (`./gradlew assembleDebug`) and uploads it as
+#      an artifact for sideloading (see docs/android-sideload-guide.md).
+#      A debug APK is signed with the standard debug key, so it installs
+#      directly — no keystore or Play Store needed.
+#
+# Verified against (2026-11-10, from the previous vps-manager app):
+#   - Capacitor 8 requires Node 22+, JDK 21, AGP 8.13, Gradle 8.14,
+#     compileSdk/targetSdk 36, minSdk 24. JDK 17 FAILS with
+#     "error: invalid source release: 21" because @capacitor/android
+#     compiles with Java 21 — so this workflow uses JDK 21 (Temurin),
+#     not 17. JDK 21 also works if the frontend is still on Capacitor 7.
+#   - Debug APK output: frontend/android/app/build/outputs/apk/debug/app-debug.apk
+#   - android-actions/setup-android@v4 (README fetched 2026-11-10):
+#     inputs `packages` (default `platform-tools`), `cmdline-tools-version`,
+#     `accept-android-sdk-licenses` (default yes). It installs cmdline-tools,
+#     accepts licenses and puts sdkmanager/adb on PATH.
+#   - Node 20 actions runtime was removed from runners 2026-09-23, so
+#     this workflow uses the first Node 24 majors: checkout@v5,
+#     setup-node@v5, setup-java@v6 (per the setup-android README example),
+#     upload-artifact@v6 (v5 still declares node20).
+#
+# Trigger manually (Actions tab -> "Build Android APK" -> Run workflow)
+# or automatically on pushes that touch the frontend.
+
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/build-android-apk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-apk:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up JDK 21
+        # NOTE: no `cache: gradle` here. setup-java's gradle cache looks
+        # for gradle files, but frontend/android/ does not exist yet at
+        # this point (it is created later by `npx cap add android`), so
+        # the cache lookup fails the run. Gradle caching can be added
+        # after the Android project exists; the build works without it.
+        uses: actions/setup-java@v6
+        with:
+          java-version: '21'
+          distribution: temurin
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          # Capacitor 8 targets SDK 36. platform-tools is included by
+          # default; add the platform + build-tools explicitly so the
+          # Gradle build never has to download them mid-run.
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check Capacitor Android dependency is present
+        run: |
+          if ! grep -q '"@capacitor/android"' package.json; then
+            echo "::error::frontend/package.json does not list @capacitor/android. Ask the frontend owner to add it (npm install @capacitor/android @capacitor/cli)."
+            exit 1
+          fi
+
+      # `npx cap add android` is non-interactive only when a Capacitor
+      # config file exists. If the frontend has not landed one yet, create
+      # a minimal default. If the frontend DOES ship its own config, this
+      # step is a no-op and the shipped appId/appName win.
+      # NOTE: the application id below (com.tianya.imagegen) becomes the
+      # app's identity on the phone. If the frontend later changes it,
+      # the phone treats it as a different app.
+      - name: Ensure Capacitor config exists
+        # NOTE: do NOT use a heredoc here. A `run: |` block is written to a
+        # temp .sh file with its indentation stripped, so the closing EOF
+        # ends up indented and the shell never sees the end of the heredoc
+        # ("syntax error: unexpected end of file"). printf writes the same
+        # fallback file without a heredoc.
+        run: |
+          if [ ! -f capacitor.config.ts ] && [ ! -f capacitor.config.json ]; then
+            echo "No Capacitor config found - creating a minimal default."
+            printf '%s\n' "{" "  \"appId\": \"com.tianya.imagegen\"," "  \"appName\": \"天涯生图\"," "  \"webDir\": \"dist\"" "}" > capacitor.config.json
+          else
+            echo "Capacitor config already present - using it as-is."
+          fi
+
+      - name: Build web app
+        run: |
+          npm run build
+          test -f dist/index.html || { echo "::error::frontend/dist/index.html missing after build - check the build script's output directory (capacitor webDir is 'dist')."; exit 1; }
+
+      - name: Add Capacitor Android platform (if absent)
+        run: |
+          if [ ! -d android ]; then
+            npx cap add android
+          else
+            echo "frontend/android/ already exists - skipping cap add."
+          fi
+
+      - name: Sync web assets into Android project
+        run: npx cap sync android
+
+      - name: Build debug APK
+        run: |
+          cd android
+          ./gradlew assembleDebug
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: tianya-imagegen-android-debug
+          path: frontend/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+          if-no-files-found: error

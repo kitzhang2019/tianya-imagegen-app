@@ -1,0 +1,173 @@
+# Build unsigned iOS .ipa (Capacitor) — GitHub Actions
+#
+# What this does:
+#   1. Checks out the repo, sets up Node 22.
+#   2. Installs frontend deps and builds the Vite web app.
+#      (No backend URL is injected: this app calls the Kaggle API
+#      directly from the phone via Capacitor's native HTTP, and the
+#      Kaggle token is entered by the user in the app's settings.)
+#   3. Scaffolds the Capacitor iOS project if `frontend/ios/` is absent
+#      (`npx cap add ios`), then `npx cap sync ios`.
+#   4. Archives with xcodebuild with code signing disabled and packages
+#      the .app into an UNSIGNED .ipa (Payload/App.app zipped).
+#      The user re-signs it locally with their own free Apple ID
+#      (see docs/ios-signing-guide.md). No Apple credentials are used here.
+#
+# Verified pattern (from the previous vps-manager app, 2026-11-10):
+#   - Capacitor 8: `npx cap add ios` / `npx cap sync ios`; iOS uses Swift
+#     Package Manager, no CocoaPods step. Xcode 26+ required.
+#   - Unsigned archive pattern:
+#       xcodebuild -project ios/App/App.xcodeproj -scheme App \
+#         -configuration Release -sdk iphoneos \
+#         -destination 'generic/platform=iOS' \
+#         -archivePath <path> archive \
+#         CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+#     then copy Products/Applications/App.app into Payload/ and zip it.
+#     NOTE: -project, NOT -workspace. Capacitor 8 scaffolds the iOS
+#     project from its Swift Package Manager template, which contains
+#     App.xcodeproj but NO App.xcworkspace (a CocoaPods-era file), so
+#     -workspace fails with "does not exist", exit code 66.
+#   - Runner: `macos-26` is GA; `macos-latest` now points at macOS 26
+#     (arm64) with Xcode 26.x installed by default.
+#   - Node 20 actions runtime was removed from runners 2026-09-23, so
+#     this workflow uses the first Node 24 majors: checkout@v5,
+#     setup-node@v5, upload-artifact@v6 (v5 still declares node20).
+#
+# Trigger manually (Actions tab -> "Build iOS (unsigned IPA)" ->
+# Run workflow) or automatically on pushes that touch the frontend.
+# macOS runners are billed per minute, so there is no scheduled run.
+
+name: Build iOS (unsigned IPA)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/build-ios-unsigned.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios-unsigned:
+    name: Build unsigned IPA
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v5
+
+      - name: Show Xcode version
+        run: |
+          xcodebuild -version
+          ls /Applications | grep -i xcode || true
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check Capacitor iOS dependency is present
+        run: |
+          if ! grep -q '"@capacitor/ios"' package.json; then
+            echo "::error::frontend/package.json does not list @capacitor/ios. Ask the frontend owner to add it (npm install @capacitor/ios @capacitor/cli)."
+            exit 1
+          fi
+
+      # `npx cap add ios` is non-interactive only when a Capacitor config
+      # file exists. If the frontend has not landed one yet, create a
+      # minimal default. If the frontend DOES ship its own config, this
+      # step is a no-op and the shipped appId/appName win.
+      # NOTE: the bundle id below (com.tianya.imagegen) becomes the app's
+      # identity for sideloading. If the frontend later changes appId,
+      # the phone treats it as a different app (old install is orphaned).
+      - name: Ensure Capacitor config exists
+        # NOTE: do NOT use a heredoc here. A `run: |` block is written to a
+        # temp .sh file with its indentation stripped, so the closing EOF
+        # ends up indented and the shell never sees the end of the heredoc
+        # ("syntax error: unexpected end of file"). printf writes the same
+        # fallback file without a heredoc.
+        run: |
+          if [ ! -f capacitor.config.ts ] && [ ! -f capacitor.config.json ]; then
+            echo "No Capacitor config found - creating a minimal default."
+            printf '%s\n' "{" "  \"appId\": \"com.tianya.imagegen\"," "  \"appName\": \"天涯生图\"," "  \"webDir\": \"dist\"" "}" > capacitor.config.json
+          else
+            echo "Capacitor config already present - using it as-is."
+          fi
+
+      - name: Build web app
+        run: |
+          npm run build
+          test -f dist/index.html || { echo "::error::frontend/dist/index.html missing after build - check the build script's output directory (capacitor webDir is 'dist')."; exit 1; }
+
+      - name: Add Capacitor iOS platform (if absent)
+        run: |
+          if [ ! -d ios ]; then
+            npx cap add ios
+          else
+            echo "frontend/ios/ already exists - skipping cap add."
+          fi
+
+      - name: Sync web assets into iOS project
+        run: npx cap sync ios
+
+      - name: Verify iOS project exists (SPM, no workspace)
+        # Fail fast here if the scaffolded project is missing, instead of
+        # letting Archive fail later with a bare "does not exist".
+        run: |
+          ls ios/App
+          test -d ios/App/App.xcodeproj || { echo "::error::ios/App/App.xcodeproj missing after cap add/sync - Capacitor SPM template did not scaffold it."; exit 1; }
+
+      - name: Generate app icons and splash (Capacitor assets)
+        # Builds the native AppIcon + launch images from
+        # frontend/assets/icon.png (1024x1024) and splash.png (2732x2732).
+        # @capacitor/assets is a devDependency (installed by npm ci).
+        run: npx @capacitor/assets generate --ios
+
+      - name: Archive (unsigned, device build)
+        # Capacitor 8 uses the Swift Package Manager template, which does
+        # NOT generate App.xcworkspace (that is a CocoaPods-era file).
+        # The SPM project entry is App.xcodeproj, so archive with
+        # -project, not -workspace (using -workspace fails with
+        # "ios/App/App.xcworkspace does not exist", exit code 66).
+        run: |
+          xcodebuild \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath ios/build/App.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            archive
+          test -d ios/build/App.xcarchive/Products/Applications/App.app || { echo "::error::Archive produced no App.app - see the xcodebuild log above."; exit 1; }
+
+      - name: Package unsigned .ipa
+        run: |
+          rm -rf ios/build/Payload ios/build/*.ipa
+          mkdir -p ios/build/Payload
+          cp -R ios/build/App.xcarchive/Products/Applications/App.app ios/build/Payload/
+          (cd ios/build && zip -qry tianya-imagegen-unsigned.ipa Payload)
+          ls -lh ios/build/tianya-imagegen-unsigned.ipa
+          unzip -l ios/build/tianya-imagegen-unsigned.ipa | head -20
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: tianya-imagegen-ios-unsigned
+          path: frontend/ios/build/tianya-imagegen-unsigned.ipa
+          retention-days: 30
+          if-no-files-found: error
