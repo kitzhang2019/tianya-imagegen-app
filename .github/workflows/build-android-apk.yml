@@ -130,6 +130,13 @@ jobs:
       - name: Sync web assets into Android project
         run: npx cap sync android
 
+      - name: Generate app icons and splash (Capacitor assets)
+        # Builds the native launcher icons + splash from
+        # frontend/assets/icon.png (1024x1024) and splash.png (2732x2732).
+        # @capacitor/assets is a devDependency (installed by npm ci).
+        # (iOS workflow already has the matching --ios step.)
+        run: npx @capacitor/assets generate --android
+
       - name: Build debug APK
         run: |
           cd android

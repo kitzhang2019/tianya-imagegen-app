@@ -1,93 +1,179 @@
-/* 天涯生图 — 移动端优先，单页应用 */
+/* 天涯生图 — iOS 毛玻璃（Liquid Glass）风格，移动端优先，单页应用 */
 
 :root {
-  --bg: #f4f6fb;
-  --card: #ffffff;
-  --ink: #1a2332;
-  --muted: #6b7686;
-  --line: #e3e8f0;
-  --accent: #2563eb;
-  --accent-ink: #ffffff;
-  --danger: #dc2626;
-  --ok: #15803d;
-  --warn: #b45309;
-  --chip: #eef2f7;
-  --radius: 14px;
+  --bg: #0b0f19;
+  --ink: #f1f5f9;
+  --muted: #a5b4c8;
+  --line: rgba(255, 255, 255, 0.16);
+  --accent1: #6366f1;
+  --accent2: #a855f7;
+  --accent3: #ec4899;
+  --danger: #f87171;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --glass: linear-gradient(135deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.05));
+  --radius: 24px;
 }
 
 * {
   box-sizing: border-box;
 }
 
+/* 关键修复：.overlay 写了 display:flex，会覆盖浏览器对 hidden 属性默认的
+   display:none，导致设置/结果浮层一打开就关不掉（hidden 设了也没用）。
+   这条规则强制 hidden 元素一律不显示。 */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
   padding: 0;
-  background: var(--bg);
   color: var(--ink);
   font-family: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   -webkit-text-size-adjust: 100%;
 }
 
-#app {
+body {
+  background:
+    radial-gradient(1100px 700px at 85% -10%, rgba(109, 40, 217, 0.55), transparent 60%),
+    radial-gradient(900px 650px at -15% 28%, rgba(236, 72, 153, 0.32), transparent 60%),
+    radial-gradient(1000px 900px at 55% 115%, rgba(37, 99, 235, 0.42), transparent 62%),
+    radial-gradient(700px 500px at 110% 60%, rgba(251, 191, 36, 0.14), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
   min-height: 100dvh;
-  padding-bottom: calc(24px + env(safe-area-inset-bottom));
 }
 
+#app {
+  min-height: 100dvh;
+}
+
+/* ---------- 顶栏 ---------- */
 .app-header {
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
-  background: #0f172a;
-  color: #fff;
+  gap: 12px;
+  padding: calc(12px + env(safe-area-inset-top)) 18px 12px;
+  background: rgba(11, 15, 25, 0.55);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  backdrop-filter: blur(22px) saturate(160%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.app-header h1 {
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.brand-mark {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+  color: #fff;
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--accent1), var(--accent2) 55%, var(--accent3));
+  box-shadow:
+    0 8px 20px rgba(168, 85, 247, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.brand-text h1 {
   margin: 0;
   font-size: 20px;
-  font-weight: 700;
+  font-weight: 800;
   letter-spacing: 1px;
 }
 
-.icon-btn {
-  min-width: 44px;
-  min-height: 44px;
-  border: none;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.14);
-  color: #fff;
-  font-size: 20px;
-  cursor: pointer;
+.brand-sub {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--muted);
 }
 
+.creds-chip {
+  flex: none;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--line);
+}
+
+.creds-chip.ok-chip {
+  color: #bbf7d0;
+  border-color: rgba(74, 222, 128, 0.4);
+  background: rgba(74, 222, 128, 0.12);
+}
+
+/* ---------- 页面与板块 ---------- */
 .page {
   max-width: 720px;
   margin: 0 auto;
-  padding: 16px 16px 0;
+  padding: 18px 16px calc(118px + env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
+.tab-page {
+  display: none;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.tab-page.active {
+  display: flex;
+  animation: fadeUp 0.28s ease;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ---------- 毛玻璃卡片 ---------- */
 .card {
-  background: var(--card);
-  border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 16px;
+  padding: 18px;
+}
+
+.glass {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  backdrop-filter: blur(22px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow:
+    0 12px 32px rgba(2, 6, 23, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
 
 .card h2 {
   margin: 0;
   font-size: 17px;
+  font-weight: 700;
 }
 
 .field-label {
   display: block;
-  margin: 14px 0 8px;
+  margin: 16px 0 8px;
   font-size: 15px;
   font-weight: 600;
 }
@@ -103,17 +189,25 @@ input[type="url"] {
   width: 100%;
   font-size: 16px; /* >=16px，避免 iOS 输入时自动放大 */
   line-height: 1.6;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: #fff;
+  padding: 13px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.07);
   color: var(--ink);
   outline: none;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+textarea::placeholder,
+input::placeholder {
+  color: rgba(165, 180, 200, 0.75);
 }
 
 textarea:focus,
 input:focus {
-  border-color: var(--accent);
+  border-color: rgba(168, 85, 247, 0.8);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.25);
 }
 
 textarea {
@@ -126,7 +220,7 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
 .muted {
@@ -138,7 +232,7 @@ textarea {
   margin: 6px 0 0;
   color: var(--muted);
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 .chips {
@@ -149,36 +243,52 @@ textarea {
 
 .chip {
   min-height: 44px;
-  padding: 8px 14px;
-  border: 1px solid var(--line);
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 999px;
-  background: var(--chip);
+  background: rgba(255, 255, 255, 0.08);
   color: var(--ink);
   font-size: 15px;
   cursor: pointer;
+  transition: transform 0.12s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chip:active {
+  transform: scale(0.96);
 }
 
 .chip.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-ink);
+  background: linear-gradient(135deg, var(--accent1), var(--accent2) 60%, var(--accent3));
+  border-color: transparent;
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 6px 18px rgba(168, 85, 247, 0.45);
 }
 
 .primary-btn,
 .secondary-btn {
   width: 100%;
-  min-height: 52px;
+  min-height: 54px;
   margin-top: 18px;
   border: none;
-  border-radius: 14px;
+  border-radius: 18px;
   font-size: 17px;
   font-weight: 700;
   cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+
+.primary-btn:active,
+.secondary-btn:active {
+  transform: scale(0.97);
 }
 
 .primary-btn {
-  background: var(--accent);
-  color: var(--accent-ink);
+  background: linear-gradient(135deg, var(--accent1), var(--accent2) 55%, var(--accent3));
+  color: #fff;
+  box-shadow:
+    0 10px 26px rgba(168, 85, 247, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
 }
 
 .primary-btn:disabled {
@@ -186,9 +296,9 @@ textarea {
 }
 
 .secondary-btn {
-  background: var(--chip);
+  background: rgba(255, 255, 255, 0.12);
   color: var(--ink);
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 .error {
@@ -207,6 +317,7 @@ textarea {
   font-size: 14px;
 }
 
+/* ---------- 任务列表 ---------- */
 .job-list {
   list-style: none;
   margin: 12px 0 0;
@@ -217,9 +328,11 @@ textarea {
 }
 
 .job {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: 0 6px 18px rgba(2, 6, 23, 0.3);
 }
 
 .job-top {
@@ -230,10 +343,12 @@ textarea {
 }
 
 .badge {
-  background: #0f172a;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.18);
   color: #fff;
   font-size: 13px;
-  padding: 3px 9px;
+  font-weight: 600;
+  padding: 3px 10px;
   border-radius: 999px;
 }
 
@@ -282,9 +397,10 @@ textarea {
 .mini-btn {
   min-height: 44px;
   padding: 8px 16px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ink);
   font-size: 15px;
   cursor: pointer;
 }
@@ -295,11 +411,12 @@ textarea {
 
 .thumb-btn {
   padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 14px;
   overflow: hidden;
   background: none;
   cursor: pointer;
+  box-shadow: 0 8px 20px rgba(2, 6, 23, 0.45);
 }
 
 .thumb-btn img {
@@ -320,12 +437,184 @@ textarea {
   padding: 0 8px;
 }
 
-/* 全屏浮层（结果查看 / 设置） */
+/* ---------- 图库 ---------- */
+.gallery-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 4px 0;
+}
+
+.gallery-head h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+
+.gallery-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.g-tile {
+  position: relative;
+  margin: 0;
+  border-radius: 20px;
+  overflow: hidden;
+  aspect-ratio: 3 / 4;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow:
+    0 12px 28px rgba(2, 6, 23, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.g-tile:active {
+  transform: scale(0.96);
+}
+
+.g-tile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.g-meta {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 26px 10px 9px;
+  background: linear-gradient(to top, rgba(2, 6, 23, 0.82), transparent);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.g-model {
+  font-weight: 700;
+}
+
+.g-size {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.g-pushed {
+  color: #bbf7d0;
+}
+
+.g-del {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 999px;
+  background: rgba(11, 15, 25, 0.55);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+/* ---------- 设置页 ---------- */
+.settings-card h2 {
+  margin-bottom: 2px;
+}
+
+.about-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.about-line {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ---------- 底部毛玻璃标签栏 ---------- */
+.tabbar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  z-index: 30;
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.55);
+  -webkit-backdrop-filter: blur(26px) saturate(180%);
+  backdrop-filter: blur(26px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow:
+    0 14px 36px rgba(2, 6, 23, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.tab-btn {
+  flex: 1;
+  min-width: 92px;
+  min-height: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, transform 0.12s ease;
+}
+
+.tab-btn:active {
+  transform: scale(0.95);
+}
+
+.tab-btn.active {
+  background: linear-gradient(135deg, var(--accent1), var(--accent2) 60%, var(--accent3));
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 6px 18px rgba(168, 85, 247, 0.5);
+}
+
+.tab-ico {
+  font-size: 19px;
+  line-height: 1;
+}
+
+.tab-txt {
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+/* ---------- 全屏浮层（结果查看） ---------- */
 .overlay {
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: #0b0f19;
+  background: rgba(5, 8, 16, 0.82);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  backdrop-filter: blur(28px) saturate(150%);
   color: #fff;
   display: flex;
   flex-direction: column;
@@ -339,6 +628,19 @@ textarea {
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
+}
+
+.icon-btn {
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  color: #fff;
+  font-size: 17px;
+  cursor: pointer;
 }
 
 .overlay-title {
@@ -362,8 +664,12 @@ textarea {
   width: 100%;
   max-height: 65dvh;
   object-fit: contain;
-  border-radius: 12px;
+  border-radius: 22px;
   background: #111827;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.6),
+    0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
 .result-body .muted {
@@ -387,62 +693,28 @@ textarea {
 }
 
 .result-actions .secondary-btn {
-  background: rgba(255, 255, 255, 0.14);
-  border-color: transparent;
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.22);
   color: #fff;
 }
 
-.settings-body {
-  padding: 8px 16px 32px;
-  max-width: 720px;
-  width: 100%;
-  margin: 0 auto;
-}
-
-.settings-body input {
-  background: #fff;
-}
-
-.settings-body .hint {
-  color: #9aa5b5;
-}
-
+/* ---------- 提示气泡 ---------- */
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(28px + env(safe-area-inset-bottom));
+  bottom: calc(96px + env(safe-area-inset-bottom));
   transform: translateX(-50%);
   z-index: 100;
   max-width: 86vw;
   padding: 12px 18px;
-  border-radius: 12px;
-  background: rgba(15, 23, 42, 0.95);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.2);
   color: #fff;
   font-size: 15px;
   line-height: 1.5;
   text-align: center;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0b0f19;
-    --card: #141b2a;
-    --ink: #e8edf5;
-    --muted: #9aa5b5;
-    --line: #26314a;
-    --chip: #1e293b;
-  }
-
-  textarea,
-  input[type="text"],
-  input[type="password"],
-  input[type="url"] {
-    background: #0f172a;
-    color: var(--ink);
-  }
-
-  .mini-btn {
-    background: #1e293b;
-    color: var(--ink);
-  }
+  box-shadow: 0 10px 28px rgba(2, 6, 23, 0.5);
 }

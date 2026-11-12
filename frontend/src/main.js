@@ -1,5 +1,6 @@
-// main.js — 界面接线：生成卡片、任务列表、结果查看、设置。
-// 单页应用，移动端优先，全中文。
+// main.js — 界面接线：生图 / 图库 / 设置 三个板块 + 结果查看。
+// 底部毛玻璃标签栏切换；生图是完整流程（提示词/模型/比例/提交/任务），
+// 图库是本机已出图的网格，设置是独立板块（不再是浮层）。
 
 import "./styles.css";
 import { Capacitor } from "@capacitor/core";
@@ -31,36 +32,98 @@ const app = document.getElementById("app");
 
 app.innerHTML = `
 <header class="app-header">
-  <h1>天涯生图</h1>
-  <button id="btn-settings" class="icon-btn" aria-label="设置">⚙️</button>
-</header>
-<main class="page">
-  <section class="card" id="gen-card">
-    <label class="field-label" for="prompt">提示词</label>
-    <textarea id="prompt" rows="6" maxlength="${MAX_PROMPT}"
-      placeholder="写下你想生成的画面……比例写在提示词里也行，比如“9:16竖屏”，选“自动”时会按它来。"></textarea>
-    <div class="row-between">
-      <span id="prompt-count" class="muted">0 / ${MAX_PROMPT}</span>
-      <span id="creds-hint" class="muted"></span>
+  <div class="brand">
+    <span class="brand-mark">✦</span>
+    <div class="brand-text">
+      <h1>天涯生图</h1>
+      <p class="brand-sub">Kaggle 免费 GPU · 出图自动进画廊</p>
     </div>
-    <div class="field-label">模型</div>
-    <div class="chips" id="model-chips"></div>
-    <div class="field-label">比例</div>
-    <div class="chips" id="ratio-chips"></div>
-    <button id="btn-submit" class="primary-btn">开始生成</button>
-    <p id="form-error" class="error" hidden></p>
+  </div>
+  <span id="creds-chip" class="creds-chip"></span>
+</header>
+
+<main class="page">
+  <!-- 生图 -->
+  <section id="tab-generate" class="tab-page active">
+    <div class="card glass gen-card">
+      <label class="field-label" for="prompt">提示词</label>
+      <textarea id="prompt" rows="6" maxlength="${MAX_PROMPT}"
+        placeholder="写下你想生成的画面……比例写在提示词里也行，比如“9:16竖屏”，选“自动”时会按它来。"></textarea>
+      <div class="row-between">
+        <span id="prompt-count" class="muted">0 / ${MAX_PROMPT}</span>
+        <span id="creds-hint" class="muted"></span>
+      </div>
+      <div class="field-label">模型</div>
+      <div class="chips" id="model-chips"></div>
+      <div class="field-label">比例</div>
+      <div class="chips" id="ratio-chips"></div>
+      <button id="btn-submit" class="primary-btn">开始生成</button>
+      <p id="form-error" class="error" hidden></p>
+    </div>
+
+    <div class="card glass">
+      <div class="row-between">
+        <h2>任务</h2>
+        <span id="jobs-count" class="muted"></span>
+      </div>
+      <ul id="job-list" class="job-list"></ul>
+      <p id="jobs-empty" class="muted empty">还没有任务，写好提示词点「开始生成」。Kaggle 上一次最多同时跑 2 个，多余的会在本地排队。</p>
+    </div>
+    <p class="footnote muted">生图走你自己的 Kaggle 账号（T4 免费 GPU），出图后自动保存到本机并推送到天涯画廊。Token 只存在本机设置里，不会发给任何第三方。</p>
   </section>
 
-  <section class="card">
-    <div class="row-between">
-      <h2>任务</h2>
-      <span id="jobs-count" class="muted"></span>
+  <!-- 图库 -->
+  <section id="tab-gallery" class="tab-page">
+    <div class="gallery-head">
+      <h2>图库</h2>
+      <span id="gallery-count" class="muted"></span>
     </div>
-    <ul id="job-list" class="job-list"></ul>
-    <p id="jobs-empty" class="muted empty">还没有任务，写好提示词点「开始生成」。Kaggle 上一次最多同时跑 2 个，多余的会在本地排队。</p>
+    <div id="gallery-grid" class="gallery-grid"></div>
+    <p id="gallery-empty" class="muted empty">还没有出图。去「生图」写一段提示词，生成的第一张图就会出现在这里。</p>
   </section>
-  <p class="footnote muted">生图走你自己的 Kaggle 账号（T4 免费 GPU），出图后自动保存到本机并推送到天涯画廊。Token 只存在本机设置里，不会发给任何第三方。</p>
+
+  <!-- 设置 -->
+  <section id="tab-settings" class="tab-page">
+    <div class="card glass settings-card">
+      <h2>Kaggle</h2>
+      <label class="field-label" for="set-username">Kaggle 用户名</label>
+      <input id="set-username" type="text" autocomplete="username" placeholder="kitzhang2019" />
+      <p class="hint">Kaggle 用户名，要和 Token 归属的账号一致。</p>
+
+      <label class="field-label" for="set-token">Kaggle API Token</label>
+      <input id="set-token" type="password" autocomplete="off" placeholder="KGAT 开头的 Token" />
+      <p class="hint" id="token-state"></p>
+      <p class="hint">在 Kaggle 设置页 API Tokens 栏点「Generate New Token」生成；Token 约 3 小时过期，过期后重新生成再填回来。</p>
+    </div>
+
+    <div class="card glass settings-card">
+      <h2>画廊</h2>
+      <label class="field-label" for="set-gallery-key">画廊推送密钥</label>
+      <input id="set-gallery-key" type="password" autocomplete="off" placeholder="天涯画廊的推送密钥" />
+      <p class="hint" id="gallery-key-state"></p>
+
+      <label class="field-label" for="set-gallery-url">画廊地址</label>
+      <input id="set-gallery-url" type="url" inputmode="url" placeholder="https://…/upload.php" />
+      <p class="hint">留空用默认地址。一般不用改。</p>
+
+      <button id="btn-save-settings" class="primary-btn">保存设置</button>
+      <p id="settings-saved" class="ok" hidden>已保存。</p>
+    </div>
+
+    <div class="card glass about-card">
+      <h2>关于</h2>
+      <p class="muted about-line">天涯生图 · 只调云端 Kaggle，不占本机算力。</p>
+      <p class="muted about-line">模型：MOSS / Qwen / Krea2 / Z-Image，尺寸按比例自动算。</p>
+      <p class="muted about-line">出图保存在本机，配好画廊密钥后自动推送到天涯画廊。</p>
+    </div>
+  </section>
 </main>
+
+<nav class="tabbar" aria-label="主导航">
+  <button type="button" class="tab-btn active" data-tab="generate"><span class="tab-ico">✦</span><span class="tab-txt">生图</span></button>
+  <button type="button" class="tab-btn" data-tab="gallery"><span class="tab-ico">▦</span><span class="tab-txt">图库</span></button>
+  <button type="button" class="tab-btn" data-tab="settings"><span class="tab-ico">⚙</span><span class="tab-txt">设置</span></button>
+</nav>
 
 <div id="result-view" class="overlay" hidden>
   <div class="overlay-bar">
@@ -79,35 +142,6 @@ app.innerHTML = `
   </div>
 </div>
 
-<div id="settings-view" class="overlay" hidden>
-  <div class="overlay-bar">
-    <button id="settings-close" class="icon-btn" aria-label="关闭">✕</button>
-    <span class="overlay-title">设置</span>
-    <span class="spacer"></span>
-  </div>
-  <div class="settings-body">
-    <label class="field-label" for="set-username">Kaggle 用户名</label>
-    <input id="set-username" type="text" autocomplete="username" placeholder="kitzhang2019" />
-    <p class="hint">Kaggle 用户名，要和 Token 归属的账号一致。</p>
-
-    <label class="field-label" for="set-token">Kaggle API Token</label>
-    <input id="set-token" type="password" autocomplete="off" placeholder="KGAT 开头的 Token" />
-    <p class="hint" id="token-state"></p>
-    <p class="hint">在 Kaggle 设置页 API Tokens 栏点「Generate New Token」生成；Token 约 3 小时过期，过期后重新生成再填回来。</p>
-
-    <label class="field-label" for="set-gallery-key">画廊推送密钥</label>
-    <input id="set-gallery-key" type="password" autocomplete="off" placeholder="天涯画廊的推送密钥" />
-    <p class="hint" id="gallery-key-state"></p>
-
-    <label class="field-label" for="set-gallery-url">画廊地址</label>
-    <input id="set-gallery-url" type="url" inputmode="url" placeholder="https://…/upload.php" />
-    <p class="hint">留空用默认地址。一般不用改。</p>
-
-    <button id="btn-save-settings" class="primary-btn">保存设置</button>
-    <p id="settings-saved" class="ok" hidden>已保存。</p>
-  </div>
-</div>
-
 <div id="toast" class="toast" hidden></div>
 `;
 
@@ -118,11 +152,15 @@ const formError = $("form-error");
 const jobListEl = $("job-list");
 const jobsEmptyEl = $("jobs-empty");
 const jobsCountEl = $("jobs-count");
+const galleryGridEl = $("gallery-grid");
+const galleryEmptyEl = $("gallery-empty");
+const galleryCountEl = $("gallery-count");
 const toastEl = $("toast");
 
 let selectedModel = "moss";
 let selectedRatio = "auto";
 let currentResultJobId = null;
+let currentTab = "generate";
 
 function esc(s) {
   return String(s ?? "")
@@ -167,7 +205,9 @@ function renderCredsHint() {
   const ok = s.kaggleUsername && s.kaggleToken;
   $("creds-hint").textContent = ok
     ? `Kaggle：${s.kaggleUsername}（已配置）`
-    : "Kaggle 未配置，点右上角 ⚙️ 填写";
+    : "Kaggle 未配置，去「设置」里填";
+  $("creds-chip").textContent = ok ? "● 已配置" : "○ 未配置";
+  $("creds-chip").classList.toggle("ok-chip", !!ok);
 }
 
 function timeAgo(ts) {
@@ -216,6 +256,61 @@ function renderJobs() {
     .join("");
 }
 
+function renderGallery() {
+  const done = getJobs().filter((j) => j.status === "done" && getImageSrc(j));
+  galleryCountEl.textContent = done.length ? `共 ${done.length} 张` : "";
+  galleryEmptyEl.hidden = done.length > 0;
+  galleryGridEl.innerHTML = done
+    .map((job) => {
+      const src = getImageSrc(job);
+      const pushed = job.galleryPushed === true;
+      return `<figure class="g-tile" data-id="${job.id}">
+        <img src="${esc(src)}" alt="${esc(MODEL_LABELS[job.model] ?? job.model)} 生成图" loading="lazy" data-view="${job.id}" />
+        <figcaption class="g-meta" data-view="${job.id}">
+          <span class="g-model">${MODEL_LABELS[job.model] ?? job.model}</span>
+          <span class="g-size">${job.width}×${job.height}</span>
+          ${pushed ? `<span class="g-pushed">✓ 已进画廊</span>` : ""}
+        </figcaption>
+        <button type="button" class="g-del" data-delete="${job.id}" aria-label="删除">✕</button>
+      </figure>`;
+    })
+    .join("");
+}
+
+function renderAll() {
+  renderCredsHint();
+  renderJobs();
+  renderGallery();
+}
+
+function fillSettings() {
+  const s = getSettings();
+  $("set-username").value = s.kaggleUsername;
+  $("set-token").value = s.kaggleToken;
+  $("set-gallery-key").value = s.galleryKey;
+  $("set-gallery-url").value = s.galleryUrl;
+  $("token-state").textContent = s.kaggleToken
+    ? `当前已配置：${maskSecret(s.kaggleToken)}（只显示头尾，完整 Token 不会在界面上出现）`
+    : "当前未配置。";
+  $("gallery-key-state").textContent = s.galleryKey
+    ? `当前已配置：${maskSecret(s.galleryKey)}`
+    : "当前未配置（不填就不推送画廊，图只保存在本机）。";
+  $("settings-saved").hidden = true;
+}
+
+function switchTab(name) {
+  currentTab = name;
+  document.querySelectorAll(".tab-page").forEach((p) => {
+    p.classList.toggle("active", p.id === `tab-${name}`);
+  });
+  document.querySelectorAll(".tab-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === name);
+  });
+  if (name === "gallery") renderGallery();
+  if (name === "settings") fillSettings();
+  window.scrollTo({ top: 0 });
+}
+
 function openResult(jobId) {
   const job = getJobs().find((j) => j.id === jobId);
   if (!job) return;
@@ -242,27 +337,6 @@ function openResult(jobId) {
 function closeResult() {
   $("result-view").hidden = true;
   currentResultJobId = null;
-}
-
-function openSettings() {
-  const s = getSettings();
-  $("set-username").value = s.kaggleUsername;
-  $("set-token").value = s.kaggleToken;
-  $("set-gallery-key").value = s.galleryKey;
-  $("set-gallery-url").value = s.galleryUrl;
-  $("token-state").textContent = s.kaggleToken
-    ? `当前已配置：${maskSecret(s.kaggleToken)}（只显示头尾，完整 Token 不会在界面上出现）`
-    : "当前未配置。";
-  $("gallery-key-state").textContent = s.galleryKey
-    ? `当前已配置：${maskSecret(s.galleryKey)}`
-    : "当前未配置（不填就不推送画廊，图只保存在本机）。";
-  $("settings-saved").hidden = true;
-  $("settings-view").hidden = false;
-}
-
-function closeSettings() {
-  $("settings-view").hidden = true;
-  renderCredsHint();
 }
 
 async function shareCurrentFile(action) {
@@ -325,8 +399,8 @@ submitBtn.addEventListener("click", async () => {
   }
   const s = getSettings();
   if (!s.kaggleUsername || !s.kaggleToken) {
-    showFormError("请先点右上角 ⚙️，填好 Kaggle 用户名和 API Token。");
-    openSettings();
+    showFormError("请先去「设置」里填好 Kaggle 用户名和 API Token。");
+    switchTab("settings");
     return;
   }
   submitBtn.disabled = true;
@@ -368,12 +442,27 @@ jobListEl.addEventListener("click", async (e) => {
   }
 });
 
+galleryGridEl.addEventListener("click", async (e) => {
+  const delBtn = e.target.closest("[data-delete]");
+  if (delBtn) {
+    if (!window.confirm("确定删除这张图吗？本机文件和任务记录都会一起删掉，画廊里的那份不受影响。")) return;
+    await deleteJob(Number(delBtn.dataset.delete));
+    return;
+  }
+  const viewEl = e.target.closest("[data-view]");
+  if (viewEl) openResult(Number(viewEl.dataset.view));
+});
+
 $("result-close").addEventListener("click", closeResult);
 $("result-img").addEventListener("click", closeResult);
 $("btn-save").addEventListener("click", () => shareCurrentFile("save"));
 $("btn-share").addEventListener("click", () => shareCurrentFile("share"));
-$("btn-settings").addEventListener("click", openSettings);
-$("settings-close").addEventListener("click", closeSettings);
+
+document.querySelector(".tabbar").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-tab]");
+  if (!btn) return;
+  switchTab(btn.dataset.tab);
+});
 
 $("btn-save-settings").addEventListener("click", async () => {
   try {
@@ -383,27 +472,25 @@ $("btn-save-settings").addEventListener("click", async () => {
       galleryKey: $("set-gallery-key").value,
       galleryUrl: $("set-gallery-url").value,
     });
+    fillSettings();
     $("settings-saved").hidden = false;
+    renderCredsHint();
     toast("设置已保存");
-    setTimeout(closeSettings, 600);
   } catch (e) {
     toast(`保存失败：${e instanceof Error ? e.message : String(e)}`);
   }
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    closeResult();
-    closeSettings();
-  }
+  if (e.key === "Escape") closeResult();
 });
 
-onJobsChange(renderJobs);
+onJobsChange(renderAll);
 
 renderModelChips();
 renderRatioChips();
-renderCredsHint();
-renderJobs();
+renderAll();
+fillSettings();
 
 initJobs().catch((e) => {
   toast(`初始化失败：${e instanceof Error ? e.message : String(e)}`);
