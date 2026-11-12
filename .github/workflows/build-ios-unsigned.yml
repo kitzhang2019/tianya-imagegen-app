@@ -171,3 +171,4 @@ jobs:
           path: frontend/ios/build/tianya-imagegen-unsigned.ipa
           retention-days: 30
           if-no-files-found: error
+# (2026-11-13) Re-register note: touch to force GitHub Actions discovery.

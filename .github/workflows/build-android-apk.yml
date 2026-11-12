@@ -143,3 +143,4 @@ jobs:
           path: frontend/android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
           if-no-files-found: error
+# (2026-11-13) Re-register note: touch to force GitHub Actions discovery.
