@@ -22,6 +22,7 @@ import {
   initJobs,
   maskSecret,
   onJobsChange,
+  pushJobToGallery,
   retryJob,
   saveSettings,
   setAdminPassword,
@@ -38,7 +39,7 @@ app.innerHTML = `
     <span class="brand-mark">✦</span>
     <div class="brand-text">
       <h1>天涯视界</h1>
-      <p class="brand-sub">云端免费 GPU · 出图自动进画廊</p>
+      <p class="brand-sub">云端免费 GPU · 出图保存在本机</p>
     </div>
   </div>
 </header>
@@ -82,7 +83,7 @@ app.innerHTML = `
       <ul id="job-list" class="job-list"></ul>
       <p id="jobs-empty" class="muted empty">还没有任务，去「生图」写好提示词点「开始生成」。一次最多同时跑 2 个，多余的会在本地排队。</p>
     </div>
-    <p class="footnote muted">生图走云端免费 GPU，出图后自动保存到本机并推送到天涯画廊。</p>
+    <p class="footnote muted">生图走云端免费 GPU，出图后自动保存到本机，在图库里手动推送到天涯画廊。</p>
   </section>
 
   <!-- 图库 -->
@@ -90,9 +91,15 @@ app.innerHTML = `
     <div class="gallery-head">
       <h2>图库</h2>
       <span id="gallery-count" class="muted"></span>
+      <button id="btn-select-mode" class="mini-btn" type="button">选择</button>
     </div>
     <div id="gallery-grid" class="gallery-grid"></div>
     <p id="gallery-empty" class="muted empty">还没有出图。去「生图」写一段提示词，生成的第一张图就会出现在这里。</p>
+    <div id="gallery-actions" class="gallery-actions" hidden>
+      <span id="gallery-selected-count" class="muted"></span>
+      <button id="btn-gallery-share" class="secondary-btn" type="button">分享</button>
+      <button id="btn-gallery-push" class="primary-btn" type="button">推送到画廊</button>
+    </div>
   </section>
 
   <!-- 设置（管理员密码锁：未解锁看不到 Kaggle 账号、Token 和画廊设置） -->
@@ -160,6 +167,16 @@ app.innerHTML = `
   </div>
 </div>
 
+<div id="share-sheet" class="overlay" hidden>
+  <div class="sheet">
+    <h3>分享</h3>
+    <p id="share-sheet-count" class="muted"></p>
+    <button id="btn-share-sheet-share" class="primary-btn">分享</button>
+    <button id="btn-share-sheet-save" class="secondary-btn">保存到相册</button>
+    <button id="btn-share-sheet-cancel" class="ghost-btn">取消</button>
+  </div>
+</div>
+
 <div id="toast" class="toast" hidden></div>
 `;
 
@@ -179,6 +196,8 @@ let selectedModel = "moss";
 let selectedRatio = "auto";
 let currentResultJobId = null;
 let currentTab = "generate";
+let gallerySelectMode = false;
+const selectedGalleryIds = new Set();
 
 function esc(s) {
   return String(s ?? "")
@@ -274,17 +293,39 @@ function renderGallery() {
     .map((job) => {
       const src = getImageSrc(job);
       const pushed = job.galleryPushed === true;
-      return `<figure class="g-tile" data-id="${job.id}">
+      const selected = selectedGalleryIds.has(job.id);
+      return `<figure class="g-tile${gallerySelectMode ? " select-mode" : ""}${selected ? " selected" : ""}" data-id="${job.id}">
         <img src="${esc(src)}" alt="${esc(MODEL_LABELS[job.model] ?? job.model)} 生成图" loading="lazy" data-view="${job.id}" />
         <figcaption class="g-meta" data-view="${job.id}">
           <span class="g-model">${MODEL_LABELS[job.model] ?? job.model}</span>
           <span class="g-size">${job.width}×${job.height}</span>
           ${pushed ? `<span class="g-pushed">✓ 已进画廊</span>` : ""}
         </figcaption>
-        <button type="button" class="g-del" data-delete="${job.id}" aria-label="删除">✕</button>
+        ${gallerySelectMode ? `<span class="g-check">${selected ? "✓" : ""}</span>` : `<button type="button" class="g-del" data-delete="${job.id}" aria-label="删除">✕</button>`}
       </figure>`;
     })
     .join("");
+  updateGalleryActions();
+}
+
+function updateGalleryActions() {
+  $("gallery-actions").hidden = !gallerySelectMode;
+  $("gallery-selected-count").textContent = selectedGalleryIds.size ? `已选 ${selectedGalleryIds.size} 张` : "未选图片";
+  $("btn-gallery-share").disabled = selectedGalleryIds.size === 0;
+  $("btn-gallery-push").disabled = selectedGalleryIds.size === 0;
+}
+
+function enterSelectMode() {
+  gallerySelectMode = true;
+  $("btn-select-mode").textContent = "取消";
+  renderGallery();
+}
+
+function exitSelectMode() {
+  gallerySelectMode = false;
+  selectedGalleryIds.clear();
+  $("btn-select-mode").textContent = "选择";
+  renderGallery();
 }
 
 function fillSettings() {
@@ -384,36 +425,49 @@ function closeResult() {
   currentResultJobId = null;
 }
 
-async function shareCurrentFile(action) {
-  const job = getJobs().find((j) => j.id === currentResultJobId);
-  if (!job || !job.imagePath) {
-    toast("图片还没读到");
+/** 分享/保存到相册（单张或多张）：把本机图片拷到 Cache，再用系统分享单发出去。 */
+async function shareJobs(jobIds, action) {
+  const jobs = jobIds
+    .map((id) => getJobs().find((j) => j.id === id))
+    .filter((j) => j && j.imageFileName);
+  if (!jobs.length) {
+    toast("没有可分享的图片");
     return;
   }
   try {
-    // Share 插件要的是本机文件路径：把 Data 目录里的图拷一份到 Cache 再分享，
-    // iOS 分享单里就会出现「存储图像」（保存到相册）。
-    const cacheUri = await Filesystem.getUri({ path: job.imageFileName, directory: Directory.Cache });
-    try {
-      await Filesystem.copy({
-        from: job.imageFileName,
-        to: job.imageFileName,
-        directory: Directory.Data,
-        toDirectory: Directory.Cache,
-      });
-    } catch {
-      // 已有同名缓存文件时直接用
+    const uris = [];
+    for (const job of jobs) {
+      const cacheUri = await Filesystem.getUri({ path: job.imageFileName, directory: Directory.Cache });
+      try {
+        await Filesystem.copy({
+          from: job.imageFileName,
+          to: job.imageFileName,
+          directory: Directory.Data,
+          toDirectory: Directory.Cache,
+        });
+      } catch {
+        // 已有同名缓存文件时直接用
+      }
+      uris.push(cacheUri.uri);
     }
     await Share.share({
       title: "天涯视界",
       dialogTitle: action === "save" ? "保存到相册" : "分享图片",
-      files: [cacheUri.uri],
+      files: uris,
     });
     if (action === "save") toast("已打开分享单，选「存储图像」即可保存到相册");
   } catch (e) {
     if (String(e?.message || e).includes("cancel")) return;
     toast(`分享失败：${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+async function shareCurrentFile(action) {
+  if (!currentResultJobId) {
+    toast("图片还没读到");
+    return;
+  }
+  await shareJobs([currentResultJobId], action);
 }
 
 promptEl.addEventListener("input", () => {
@@ -483,6 +537,15 @@ jobListEl.addEventListener("click", async (e) => {
 });
 
 galleryGridEl.addEventListener("click", async (e) => {
+  if (gallerySelectMode) {
+    const tile = e.target.closest(".g-tile");
+    if (!tile) return;
+    const id = Number(tile.dataset.id);
+    if (selectedGalleryIds.has(id)) selectedGalleryIds.delete(id);
+    else selectedGalleryIds.add(id);
+    renderGallery();
+    return;
+  }
   const delBtn = e.target.closest("[data-delete]");
   if (delBtn) {
     if (!window.confirm("确定删除这张图吗？本机文件和任务记录都会一起删掉，画廊里的那份不受影响。")) return;
@@ -491,6 +554,78 @@ galleryGridEl.addEventListener("click", async (e) => {
   }
   const viewEl = e.target.closest("[data-view]");
   if (viewEl) openResult(Number(viewEl.dataset.view));
+});
+
+$("btn-select-mode").addEventListener("click", () => {
+  if (gallerySelectMode) exitSelectMode();
+  else enterSelectMode();
+});
+
+$("btn-gallery-share").addEventListener("click", () => {
+  if (!selectedGalleryIds.size) {
+    toast("先选几张图");
+    return;
+  }
+  $("share-sheet-count").textContent = `已选 ${selectedGalleryIds.size} 张`;
+  $("share-sheet").hidden = false;
+});
+
+$("btn-share-sheet-share").addEventListener("click", async () => {
+  $("share-sheet").hidden = true;
+  await shareJobs([...selectedGalleryIds], "share");
+});
+
+$("btn-share-sheet-save").addEventListener("click", async () => {
+  $("share-sheet").hidden = true;
+  await shareJobs([...selectedGalleryIds], "save");
+});
+
+$("btn-share-sheet-cancel").addEventListener("click", () => {
+  $("share-sheet").hidden = true;
+});
+
+$("btn-gallery-push").addEventListener("click", async () => {
+  const ids = [...selectedGalleryIds];
+  if (!ids.length) {
+    toast("先选几张图");
+    return;
+  }
+  if (!getSettings().galleryKey) {
+    toast("请先在「设置」里填好画廊推送密钥");
+    switchTab("settings");
+    return;
+  }
+  const btn = $("btn-gallery-push");
+  btn.disabled = true;
+  btn.textContent = "推送中…";
+  let ok = 0;
+  let fail = 0;
+  let lastError = "";
+  for (const id of ids) {
+    try {
+      const res = await pushJobToGallery(id);
+      if (res.ok) ok++;
+      else {
+        fail++;
+        lastError = res.error || "";
+      }
+    } catch (err) {
+      fail++;
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  btn.disabled = false;
+  btn.textContent = "推送到画廊";
+  renderGallery();
+  renderJobs();
+  if (fail === 0) {
+    toast(`已推送 ${ok} 张到画廊`);
+  } else if (ok === 0) {
+    toast(`推送失败：${lastError}`);
+  } else {
+    toast(`已推送 ${ok} 张，${fail} 张失败：${lastError}`);
+  }
+  exitSelectMode();
 });
 
 $("result-close").addEventListener("click", closeResult);

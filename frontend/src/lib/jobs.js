@@ -6,6 +6,7 @@ import { Preferences } from "@capacitor/preferences";
 import { Directory, Filesystem } from "@capacitor/filesystem";
 import {
   NOTEBOOK_KINDS,
+  base64ToBytes,
   bytesToBase64,
   kernelBaseSlug,
   outputFileName,
@@ -252,6 +253,34 @@ export async function retryJob(id) {
   return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto" });
 }
 
+/** 手动推送到画廊（图库多选推送用）：读本机图片文件，按画廊设置推送，更新任务状态。 */
+export async function pushJobToGallery(id) {
+  const job = jobs.find((j) => j.id === id);
+  if (!job) throw new Error("找不到这条任务");
+  if (job.status !== "done" || !job.imageFileName) throw new Error("这张图还没完成，推不了");
+  if (!settings.galleryKey) throw new Error("请先在设置里填好画廊推送密钥");
+  let bytes;
+  try {
+    const { data } = await Filesystem.readFile({ path: `images/${job.imageFileName}`, directory: Directory.Data });
+    bytes = base64ToBytes(data);
+  } catch {
+    throw new Error("本机图片文件读不到，推不了");
+  }
+  const push = await pushToGallery({
+    url: settings.galleryUrl,
+    key: settings.galleryKey,
+    job,
+    pngBytes: bytes,
+    fileName: job.imageFileName,
+  });
+  updateJob(job.id, {
+    galleryPushed: push.ok,
+    galleryError: push.ok ? null : push.error,
+  });
+  await saveJobs();
+  return push;
+}
+
 export async function deleteJob(id) {
   const job = jobs.find((j) => j.id === id);
   jobs = jobs.filter((j) => j.id !== id);
@@ -495,24 +524,7 @@ async function finishJob(job, url = null) {
     });
     await saveJobs();
 
-    // 画廊推送：只推真实完成的图；失败只记在任务上
-    if (settings.galleryKey) {
-      const push = await pushToGallery({
-        url: settings.galleryUrl,
-        key: settings.galleryKey,
-        job: jobs.find((j) => j.id === job.id) || job,
-        pngBytes: bytes,
-        fileName: job.imageFileName,
-      });
-      updateJob(job.id, {
-        galleryPushed: push.ok,
-        galleryError: push.ok ? null : push.error,
-      });
-      await saveJobs();
-    } else {
-      updateJob(job.id, { galleryPushed: null, galleryError: "未配置画廊推送密钥" });
-      await saveJobs();
-    }
+    // 不自动推送画廊：图只保存在本机，用户在图库里手动多选推送。
   } catch (e) {
     const current = jobs.find((j) => j.id === job.id);
     if (!current || isTerminal(current)) return;
