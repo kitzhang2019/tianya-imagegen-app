@@ -15,6 +15,7 @@ import {
 import {
   STAGE_LABELS,
   deleteJob,
+  getAdminPassword,
   getImageSrc,
   getJobs,
   getSettings,
@@ -23,6 +24,7 @@ import {
   onJobsChange,
   retryJob,
   saveSettings,
+  setAdminPassword,
   submitJob,
 } from "./lib/jobs.js";
 
@@ -35,11 +37,10 @@ app.innerHTML = `
   <div class="brand">
     <span class="brand-mark">✦</span>
     <div class="brand-text">
-      <h1>天涯生图</h1>
-      <p class="brand-sub">Kaggle 免费 GPU · 出图自动进画廊</p>
+      <h1>天涯视界</h1>
+      <p class="brand-sub">云端免费 GPU · 出图自动进画廊</p>
     </div>
   </div>
-  <span id="creds-chip" class="creds-chip"></span>
 </header>
 
 <main class="page">
@@ -51,7 +52,6 @@ app.innerHTML = `
         placeholder="写下你想生成的画面……比例写在提示词里也行，比如“9:16竖屏”，选“自动”时会按它来。"></textarea>
       <div class="row-between">
         <span id="prompt-count" class="muted">0 / ${MAX_PROMPT}</span>
-        <span id="creds-hint" class="muted"></span>
       </div>
       <div class="select-row">
         <label class="select-label" for="model-select">模型</label>
@@ -80,9 +80,9 @@ app.innerHTML = `
         <span id="jobs-count" class="muted"></span>
       </div>
       <ul id="job-list" class="job-list"></ul>
-      <p id="jobs-empty" class="muted empty">还没有任务，去「生图」写好提示词点「开始生成」。Kaggle 上一次最多同时跑 2 个，多余的会在本地排队。</p>
+      <p id="jobs-empty" class="muted empty">还没有任务，去「生图」写好提示词点「开始生成」。一次最多同时跑 2 个，多余的会在本地排队。</p>
     </div>
-    <p class="footnote muted">生图走你自己的 Kaggle 账号（T4 免费 GPU），出图后自动保存到本机并推送到天涯画廊。Token 只存在本机设置里，不会发给任何第三方。</p>
+    <p class="footnote muted">生图走云端免费 GPU，出图后自动保存到本机并推送到天涯画廊。</p>
   </section>
 
   <!-- 图库 -->
@@ -95,9 +95,27 @@ app.innerHTML = `
     <p id="gallery-empty" class="muted empty">还没有出图。去「生图」写一段提示词，生成的第一张图就会出现在这里。</p>
   </section>
 
-  <!-- 设置 -->
+  <!-- 设置（管理员密码锁：未解锁看不到 Kaggle 账号、Token 和画廊设置） -->
   <section id="tab-settings" class="tab-page">
-    <div class="card glass settings-card">
+    <div id="settings-lock" class="card glass" hidden>
+      <h2>设置已锁定</h2>
+      <p class="muted">Kaggle 账号、Token 和画廊设置需要管理员密码才能查看和修改。</p>
+      <label class="field-label" for="admin-password">管理员密码</label>
+      <input id="admin-password" type="password" inputmode="numeric" autocomplete="off" placeholder="输入管理员密码" />
+      <p id="admin-password-error" class="error" hidden>密码不对，请重试。</p>
+      <button id="btn-unlock-settings" class="primary-btn">解锁设置</button>
+    </div>
+    <div id="settings-first" class="card glass" hidden>
+      <h2>首次使用：设置管理员密码</h2>
+      <p class="muted">以后查看和修改 Kaggle 账号、Token 和画廊设置都要输这个密码。密码只存在本机，不会上传。</p>
+      <label class="field-label" for="admin-password-new">管理员密码</label>
+      <input id="admin-password-new" type="password" inputmode="numeric" autocomplete="off" placeholder="输入密码" />
+      <label class="field-label" for="admin-password-confirm">确认密码</label>
+      <input id="admin-password-confirm" type="password" inputmode="numeric" autocomplete="off" placeholder="再输一次" />
+      <p id="admin-password-set-error" class="error" hidden></p>
+      <button id="btn-set-admin-password" class="primary-btn">设置密码</button>
+    </div>
+    <div id="settings-form" class="card glass settings-card" hidden>
       <h2>Kaggle</h2>
       <label class="field-label" for="set-username">Kaggle 用户名</label>
       <input id="set-username" type="text" autocomplete="username" placeholder="kitzhang2019" />
@@ -113,6 +131,7 @@ app.innerHTML = `
       <input id="set-gallery-url" type="url" inputmode="url" placeholder="https://…/upload.php" />
       <button id="btn-save-settings" class="primary-btn">保存设置</button>
       <p id="settings-saved" class="ok" hidden>已保存。</p>
+      <button id="btn-lock-settings" class="secondary-btn">锁定设置</button>
     </div>
   </section>
 </main>
@@ -196,16 +215,6 @@ function populateSelects() {
     ).join("");
 }
 
-function renderCredsHint() {
-  const s = getSettings();
-  const ok = s.kaggleUsername && s.kaggleToken;
-  $("creds-hint").textContent = ok
-    ? `Kaggle：${s.kaggleUsername}（已配置）`
-    : "Kaggle 未配置，去「设置」里填";
-  $("creds-chip").textContent = ok ? "● 已配置" : "○ 未配置";
-  $("creds-chip").classList.toggle("ok-chip", !!ok);
-}
-
 function timeAgo(ts) {
   const mins = Math.max(0, Math.round((Date.now() - ts) / 60000));
   if (mins < 1) return "刚刚";
@@ -213,6 +222,11 @@ function timeAgo(ts) {
   const hours = Math.round(mins / 60);
   if (hours < 24) return `${hours} 小时前`;
   return `${Math.round(hours / 24)} 天前`;
+}
+
+function renderAll() {
+  renderJobs();
+  renderGallery();
 }
 
 function renderJobs() {
@@ -273,12 +287,6 @@ function renderGallery() {
     .join("");
 }
 
-function renderAll() {
-  renderCredsHint();
-  renderJobs();
-  renderGallery();
-}
-
 function fillSettings() {
   const s = getSettings();
   $("set-username").value = s.kaggleUsername;
@@ -295,6 +303,7 @@ function fillSettings() {
 }
 
 function switchTab(name) {
+  const prev = currentTab;
   currentTab = name;
   document.querySelectorAll(".tab-page").forEach((p) => {
     p.classList.toggle("active", p.id === `tab-${name}`);
@@ -302,9 +311,49 @@ function switchTab(name) {
   document.querySelectorAll(".tab-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.tab === name);
   });
+  if (prev === "settings" && name !== "settings") lockSettings();
   if (name === "gallery") renderGallery();
-  if (name === "settings") fillSettings();
+  if (name === "settings") renderSettings();
   window.scrollTo({ top: 0 });
+}
+
+// ---------- 设置页的管理员密码锁 ----------
+// 密码只存在本机 Preferences，永不写进代码/仓库；切出设置页自动重新上锁。
+let settingsUnlocked = false;
+
+function lockSettings() {
+  settingsUnlocked = false;
+  ["set-username", "set-token", "set-gallery-key", "set-gallery-url", "admin-password", "admin-password-new", "admin-password-confirm"].forEach((id) => {
+    const el = $(id);
+    if (el) el.value = "";
+  });
+  const err = $("admin-password-error");
+  if (err) err.hidden = true;
+}
+
+async function renderSettings() {
+  const pw = await getAdminPassword();
+  const lockEl = $("settings-lock");
+  const firstEl = $("settings-first");
+  const formEl = $("settings-form");
+  if (!pw) {
+    lockEl.hidden = true;
+    formEl.hidden = true;
+    firstEl.hidden = false;
+    return;
+  }
+  if (settingsUnlocked) {
+    lockEl.hidden = true;
+    firstEl.hidden = true;
+    formEl.hidden = false;
+    fillSettings();
+  } else {
+    formEl.hidden = true;
+    firstEl.hidden = true;
+    lockEl.hidden = false;
+    $("admin-password").value = "";
+    $("admin-password-error").hidden = true;
+  }
 }
 
 function openResult(jobId) {
@@ -325,7 +374,7 @@ function openResult(jobId) {
   } else if (job.galleryPushed === false) {
     g.innerHTML = `<span class="warn">画廊推送失败：${esc(job.galleryError || "未知原因")}（图已保存在本机）</span>`;
   } else {
-    g.textContent = "未配置画廊推送密钥，图只保存在本机。";
+    g.textContent = "图已保存在本机。";
   }
   $("result-view").hidden = false;
 }
@@ -356,7 +405,7 @@ async function shareCurrentFile(action) {
       // 已有同名缓存文件时直接用
     }
     await Share.share({
-      title: "天涯生图",
+      title: "天涯视界",
       dialogTitle: action === "save" ? "保存到相册" : "分享图片",
       files: [cacheUri.uri],
     });
@@ -389,7 +438,7 @@ submitBtn.addEventListener("click", async () => {
   }
   const s = getSettings();
   if (!s.kaggleUsername || !s.kaggleToken) {
-    showFormError("请先去「设置」里填好 Kaggle 用户名和 API Token。");
+    showFormError("请先在「设置」里完成配置。");
     switchTab("settings");
     return;
   }
@@ -399,7 +448,7 @@ submitBtn.addEventListener("click", async () => {
     await submitJob({ model: selectedModel, prompt, ratioKey: selectedRatio });
     promptEl.value = "";
     $("prompt-count").textContent = `0 / ${MAX_PROMPT}`;
-    toast("已提交，Kaggle 排队中（一次最多同时跑 2 个）");
+    toast("已提交，云端排队中（一次最多同时跑 2 个）");
     switchTab("tasks");
   } catch (e) {
     showFormError(e instanceof Error ? e.message : String(e));
@@ -455,6 +504,46 @@ document.querySelector(".tabbar").addEventListener("click", (e) => {
   switchTab(btn.dataset.tab);
 });
 
+$("btn-unlock-settings").addEventListener("click", async () => {
+  const pw = await getAdminPassword();
+  const entered = $("admin-password").value;
+  if (pw && entered === pw) {
+    settingsUnlocked = true;
+    renderSettings();
+  } else {
+    $("admin-password-error").hidden = false;
+  }
+});
+
+$("admin-password").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("btn-unlock-settings").click();
+});
+
+$("btn-set-admin-password").addEventListener("click", async () => {
+  const pw = $("admin-password-new").value;
+  const confirm = $("admin-password-confirm").value;
+  const err = $("admin-password-set-error");
+  if (!pw || pw.length < 4) {
+    err.textContent = "密码至少 4 位。";
+    err.hidden = false;
+    return;
+  }
+  if (pw !== confirm) {
+    err.textContent = "两次输入的密码不一致。";
+    err.hidden = false;
+    return;
+  }
+  await setAdminPassword(pw);
+  settingsUnlocked = true;
+  renderSettings();
+  toast("管理员密码已设置");
+});
+
+$("btn-lock-settings").addEventListener("click", () => {
+  lockSettings();
+  renderSettings();
+});
+
 $("btn-save-settings").addEventListener("click", async () => {
   try {
     await saveSettings({
@@ -465,7 +554,6 @@ $("btn-save-settings").addEventListener("click", async () => {
     });
     fillSettings();
     $("settings-saved").hidden = false;
-    renderCredsHint();
     toast("设置已保存");
   } catch (e) {
     toast(`保存失败：${e instanceof Error ? e.message : String(e)}`);
@@ -480,7 +568,6 @@ onJobsChange(renderAll);
 
 populateSelects();
 renderAll();
-fillSettings();
 
 initJobs().catch((e) => {
   toast(`初始化失败：${e instanceof Error ? e.message : String(e)}`);

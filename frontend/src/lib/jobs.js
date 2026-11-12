@@ -19,6 +19,17 @@ import { DEFAULT_GALLERY_URL, pushToGallery } from "./gallery.js";
 const PREF_JOBS = "tianya-imagegen-jobs";
 const PREF_SETTINGS = "tianya-imagegen-settings";
 const PREF_COUNTER = "tianya-imagegen-counter";
+const PREF_ADMIN_PASSWORD = "tianya-imagegen-admin-password";
+
+/** 管理员密码（只存在本机 Preferences，永不写进代码/仓库）。 */
+export async function getAdminPassword() {
+  const { value } = await Preferences.get({ key: PREF_ADMIN_PASSWORD });
+  return value || null;
+}
+
+export async function setAdminPassword(pw) {
+  await Preferences.set({ key: PREF_ADMIN_PASSWORD, value: String(pw) });
+}
 
 const MAX_JOBS = 50;
 const MAX_ACTIVE = 2;
@@ -189,7 +200,7 @@ function makeClient() {
 
 function requireCreds() {
   if (!settings.kaggleUsername || !settings.kaggleToken) {
-    throw new Error("请先在设置里填好 Kaggle 用户名和 API Token，再提交生图。");
+    throw new Error("请先在设置里完成配置，再提交生图。");
   }
 }
 
@@ -212,7 +223,7 @@ export async function submitJob({ model, prompt, ratioKey = "auto" }) {
     seed: randomSeed(),
     status: "queued-local",
     stage: "queued-local",
-    stageDetail: "本地排队，等空闲的 Kaggle 会话",
+    stageDetail: "本地排队，等空闲的云端会话",
     kaggleRef: null,
     kaggleSlug: null,
     createdAt: Date.now(),
@@ -295,10 +306,10 @@ async function verifyKernel(job, client) {
           stage: state === "running" || state === "complete" ? "running" : "queued",
           stageDetail:
             state === "running"
-              ? "Kaggle 已开始运行"
+              ? "云端已开始运行"
               : state === "complete"
-                ? "Kaggle 已跑完，正在取图"
-                : "已确认 Kernel 存在，Kaggle 排队中",
+                ? "云端已跑完，正在取图"
+                : "已确认任务存在，云端排队中",
         });
         await saveJobs();
         return true;
@@ -308,7 +319,7 @@ async function verifyKernel(job, client) {
         return false;
       }
       updateJob(job.id, {
-        stageDetail: `Kaggle 已接受推送，正在核实 Kernel（${chk.detail}）`,
+        stageDetail: `云端已接受推送，正在核实（${chk.detail}）`,
       });
       await saveJobs();
       const left = deadline - Date.now();
@@ -319,7 +330,7 @@ async function verifyKernel(job, client) {
     }
     await failJob(
       job,
-      `Kaggle API 推送当时返回了成功（${job.kaggleRef}），但 5 分钟内反复核实都没在 Kaggle 上找到这个 Kernel。推送没有真正在 Kaggle 上建出 Kernel，任务从未进入排队。可以点「重新提交」再试。`,
+      `云端推送当时返回了成功（${job.kaggleRef}），但 5 分钟内反复核实都没在云端找到这个任务。推送没有真正在云端建出任务，任务从未进入排队。可以点「重新提交」再试。`,
     );
     return false;
   } finally {
@@ -355,10 +366,10 @@ async function runJob(job) {
       if (!resolved.ref) {
         if (resolved.conclusive) {
           throw new Error(
-            "Kaggle 上找不到 Moody 模型数据集（moody-moss-mix-v33）里的完整模型文件，推送已取消。请先确认数据集已建好、文件大小无误，再重新提交。",
+            "云端找不到 Moody 模型数据集（moody-moss-mix-v33）里的完整模型文件，推送已取消。请先确认数据集已建好、文件大小无误，再重新提交。",
           );
         }
-        throw new Error("暂时连不上 Kaggle，没法确认模型数据集，请稍后重试。");
+        throw new Error("暂时连不上云端，没法确认模型数据集，请稍后重试。");
       }
       datasetSources = [resolved.ref];
       updateJob(job.id, { stageDetail: `模型数据集已确认（${resolved.ref}），正在推送…` });
@@ -375,7 +386,7 @@ async function runJob(job) {
     if (datasetSources.length > 0) {
       const bad = push.invalidDatasetSources || [];
       if (bad.some((s) => datasetSources.includes(s))) {
-        throw new Error(`Kaggle 拒绝挂接模型数据集（${datasetSources.join("、")}）：推送已取消，请检查数据集是否存在且为私有。`);
+        throw new Error(`云端拒绝挂接模型数据集（${datasetSources.join("、")}）：推送已取消，请检查数据集是否存在且为私有。`);
       }
     }
     const kaggleRef =
@@ -387,7 +398,7 @@ async function runJob(job) {
       kaggleSlug: slug,
       pushedAt: Date.now(),
       verifyDeadlineAt: Date.now() + VERIFY_WINDOW_MS,
-      stageDetail: "Kaggle 已接受推送，正在核实 Kernel…",
+      stageDetail: "云端已接受推送，正在核实…",
     });
     await saveJobs();
 
@@ -537,11 +548,11 @@ async function tick() {
           continue;
         }
         if (job.verifyDeadlineAt && now > job.verifyDeadlineAt) {
-          await failJob(job, "推送后 5 分钟内没在 Kaggle 上核实到 Kernel，任务从未进入排队。可以点「重新提交」再试。");
+          await failJob(job, "推送后 5 分钟内没在云端核实到任务，任务从未进入排队。可以点「重新提交」再试。");
           continue;
         }
         if (now - (job.pushedAt || job.createdAt) > PREPARE_BACKSTOP_MS) {
-          await failJob(job, "准备阶段超过 20 分钟仍没确认到 Kernel，已自动结束。请重新提交。");
+          await failJob(job, "准备阶段超过 20 分钟仍没确认到任务，已自动结束。请重新提交。");
           continue;
         }
         if (!verifyingJobs.has(job.id)) verifyKernel(job, makeClient());
@@ -560,7 +571,7 @@ async function tick() {
       // queued / running
       if (!job.kaggleRef) continue;
       if (now - job.createdAt > QUEUED_BACKSTOP_MS && job.status === "queued") {
-        await failJob(job, "Kaggle 排队超过 6 小时仍没开始，已自动结束。可以点「重新提交」再试。");
+        await failJob(job, "云端排队超过 6 小时仍没开始，已自动结束。可以点「重新提交」再试。");
         continue;
       }
       const client = makeClient();
@@ -575,7 +586,7 @@ async function tick() {
         continue;
       }
       if (st.state === "error") {
-        await failJob(job, `Kaggle 运行失败${st.failure ? `：${st.failure}` : "（Kaggle 没给具体原因）"}`);
+        await failJob(job, `云端运行失败${st.failure ? `：${st.failure}` : "（云端没给具体原因）"}`);
         continue;
       }
       if (st.state === "queued" || st.state === "running") {
@@ -586,8 +597,8 @@ async function tick() {
           stage: nextStatus,
           stageDetail:
             nextStatus === "running"
-              ? "Kaggle 正在生成"
-              : `Kaggle 排队中（已等约 ${Math.max(1, Math.round(stageAge / 60000))} 分钟）`,
+              ? "云端正在生成"
+              : `云端排队中（已等约 ${Math.max(1, Math.round(stageAge / 60000))} 分钟）`,
         });
         await saveJobs();
         // 排队/运行超过 20 分钟：状态接口可能不报完成，探输出列表兜底
@@ -601,7 +612,7 @@ async function tick() {
       updateJob(job.id, {
         stageDetail: st.error
           ? `状态接口暂时查不到：${String(st.error).slice(0, 120)}，正在翻输出列表找结果图`
-          : `Kaggle 返回了不认识的状态${st.raw ? `「${st.raw}」` : ""}，正在翻输出列表找结果图`,
+          : `云端返回了不认识的状态${st.raw ? `「${st.raw}」` : ""}，正在翻输出列表找结果图`,
       });
       await saveJobs();
       const url = await probeOutput(job, client);
