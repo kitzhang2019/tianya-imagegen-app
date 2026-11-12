@@ -19,12 +19,14 @@ import {
   getAdminPassword,
   getImageSrc,
   getJobs,
+  getRegenPair,
   getSettings,
   getThumbSrc,
   initJobs,
   maskSecret,
   onJobsChange,
   pushJobToGallery,
+  regenerateJob,
   retryJob,
   saveSettings,
   setAdminPassword,
@@ -163,9 +165,29 @@ app.innerHTML = `
     <p id="result-meta" class="muted"></p>
     <p id="result-gallery" class="gallery-line"></p>
     <div class="result-actions">
+      <button id="btn-regen" class="secondary-btn">↻ 重新生成</button>
+      <button id="btn-compare" class="secondary-btn" hidden>对比</button>
       <button id="btn-save" class="primary-btn">保存到相册</button>
       <button id="btn-share" class="secondary-btn">分享</button>
     </div>
+  </div>
+</div>
+
+<div id="compare-view" class="overlay" hidden>
+  <div class="overlay-bar">
+    <button id="compare-close" class="icon-btn" aria-label="关闭">✕</button>
+    <span class="overlay-title">对比</span>
+    <span class="spacer"></span>
+  </div>
+  <div class="compare-body">
+    <figure class="compare-item">
+      <img id="compare-img-a" alt="原图" />
+      <figcaption id="compare-label-a" class="muted"></figcaption>
+    </figure>
+    <figure class="compare-item">
+      <img id="compare-img-b" alt="重新生成的图" />
+      <figcaption id="compare-label-b" class="muted"></figcaption>
+    </figure>
   </div>
 </div>
 
@@ -296,14 +318,16 @@ function renderGallery() {
       const src = getThumbSrc(job);
       const pushed = job.galleryPushed === true;
       const selected = selectedGalleryIds.has(job.id);
+      const isRegen = !!job.regeneratedFrom;
       return `<figure class="g-tile${gallerySelectMode ? " select-mode" : ""}${selected ? " selected" : ""}" data-id="${job.id}">
         <img src="${esc(src)}" alt="${esc(MODEL_LABELS[job.model] ?? job.model)} 生成图" loading="lazy" data-view="${job.id}" />
         <figcaption class="g-meta" data-view="${job.id}">
           <span class="g-model">${MODEL_LABELS[job.model] ?? job.model}</span>
           <span class="g-size">${job.width}×${job.height}</span>
+          ${isRegen ? `<span class="g-pushed">↻ 重新生成</span>` : ""}
           ${pushed ? `<span class="g-pushed">✓ 已进画廊</span>` : ""}
         </figcaption>
-        ${gallerySelectMode ? `<span class="g-check">${selected ? "✓" : ""}</span>` : `<button type="button" class="g-del" data-delete="${job.id}" aria-label="删除">✕</button>`}
+        ${gallerySelectMode ? `<span class="g-check">${selected ? "✓" : ""}</span>` : `<button type="button" class="g-regen" data-regen="${job.id}" aria-label="重新生成">↻</button><button type="button" class="g-del" data-delete="${job.id}" aria-label="删除">✕</button>`}
       </figure>`;
     })
     .join("");
@@ -424,6 +448,8 @@ function openResult(jobId) {
   } else {
     g.textContent = "图已保存在本机。";
   }
+  // 有重新生成关联且对方图已出来时，才显示对比按钮
+  $("btn-compare").hidden = !getRegenPair(job);
   $("result-view").hidden = false;
 }
 
@@ -431,6 +457,40 @@ function closeResult() {
   $("result-view").hidden = true;
   currentResultJobId = null;
   resetZoom();
+}
+
+/** 重新生成当前这张图：旧图保留，新任务进任务页；正在生成时对方图还没出来，对比按钮先不显示。 */
+async function regenerateCurrent() {
+  if (!currentResultJobId) return;
+  try {
+    const job = await regenerateJob(currentResultJobId);
+    toast("已重新生成，新任务在任务页排队");
+    closeResult();
+    switchTab("tasks");
+    renderJobs();
+  } catch (e) {
+    toast(e.message || "重新生成失败");
+  }
+}
+
+/** 打开对比视图：原图和重新生成的图上下并排，点任意一张切回大图看。 */
+function openCompare() {
+  const job = getJobs().find((j) => j.id === currentResultJobId);
+  const pair = getRegenPair(job);
+  if (!job || !pair) return;
+  const orig = job.regeneratedFrom ? pair : job;
+  const regen = job.regeneratedFrom ? job : pair;
+  $("compare-img-a").src = getImageSrc(orig);
+  $("compare-label-a").textContent = `原图 · ${MODEL_LABELS[orig.model] ?? orig.model} · 种子 ${orig.seed}`;
+  $("compare-img-b").src = getImageSrc(regen);
+  $("compare-label-b").textContent = `重新生成 · ${MODEL_LABELS[regen.model] ?? regen.model} · 种子 ${regen.seed}`;
+  $("compare-img-a").dataset.view = orig.id;
+  $("compare-img-b").dataset.view = regen.id;
+  $("compare-view").hidden = false;
+}
+
+function closeCompare() {
+  $("compare-view").hidden = true;
 }
 
 // ---------- 大图捏合缩放（双指缩放 1x-4x、放大后单指拖动、双击切换 1x/2.5x） ----------
@@ -661,6 +721,17 @@ galleryGridEl.addEventListener("click", async (e) => {
     await deleteJob(Number(delBtn.dataset.delete));
     return;
   }
+  const regenBtn = e.target.closest("[data-regen]");
+  if (regenBtn) {
+    try {
+      await regenerateJob(Number(regenBtn.dataset.regen));
+      toast("已重新生成，旧图保留，新任务在任务页排队");
+      switchTab("tasks");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err));
+    }
+    return;
+  }
   const viewEl = e.target.closest("[data-view]");
   if (viewEl) openResult(Number(viewEl.dataset.view));
 });
@@ -738,6 +809,17 @@ $("btn-gallery-push").addEventListener("click", async () => {
 });
 
 $("result-close").addEventListener("click", closeResult);
+$("btn-regen").addEventListener("click", regenerateCurrent);
+$("btn-compare").addEventListener("click", openCompare);
+$("compare-close").addEventListener("click", closeCompare);
+// 对比视图里点任意一张图，关掉对比、切回大图看那一张
+$("compare-view").addEventListener("click", (e) => {
+  const viewEl = e.target.closest("[data-view]");
+  if (viewEl) {
+    closeCompare();
+    openResult(Number(viewEl.dataset.view));
+  }
+});
 // 点一下图关闭；双击是缩放，所以单击要等 260ms 确认不是双击
 resultImg.addEventListener("click", () => {
   if (zoomSuppressClick) return;

@@ -310,6 +310,8 @@ export async function submitJob({ model, prompt, ratioKey = "auto" }) {
     imageFileName: outputFileName(model, id),
     galleryPushed: null,
     galleryError: null,
+    regeneratedFrom: null, // 重新生成时，指向原图任务 id
+    regeneratedBy: null, // 被重新生成时，指向新图任务 id
     outputResumeToken: null,
     outputScanned: 0,
     downloadStartedAt: null,
@@ -325,6 +327,28 @@ export async function retryJob(id) {
   const old = jobs.find((j) => j.id === id);
   if (!old) throw new Error("找不到这条任务");
   return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto" });
+}
+
+/** 重新生成：同提示词/模型/比例新开一个任务（新种子），旧图保留，两图互相关联，方便对比。 */
+export async function regenerateJob(id) {
+  const old = jobs.find((j) => j.id === id);
+  if (!old) throw new Error("找不到这张图");
+  if (old.status !== "done") throw new Error("这张图还没完成，不能重新生成");
+  const job = await submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto" });
+  job.regeneratedFrom = old.id;
+  old.regeneratedBy = job.id;
+  await saveJobs();
+  return job;
+}
+
+/** 找一对重新生成关联里另一张已完成的图（原图或新图），没有返回 null。 */
+export function getRegenPair(job) {
+  if (!job) return null;
+  const otherId = job.regeneratedFrom || job.regeneratedBy;
+  if (!otherId) return null;
+  const other = jobs.find((j) => j.id === otherId);
+  if (!other || other.status !== "done" || !getImageSrc(other)) return null;
+  return other;
 }
 
 /** 手动推送到画廊（图库多选推送用）：读本机图片文件，按画廊设置推送，更新任务状态。 */
