@@ -18,6 +18,7 @@ import {
   ensureThumbnails,
   getAdminPassword,
   getImageSrc,
+  getJobProgress,
   getJobs,
   getRegenPair,
   getSettings,
@@ -38,6 +39,15 @@ const MAX_PROMPT = 10000;
 const app = document.getElementById("app");
 
 app.innerHTML = `
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="ring-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1" />
+      <stop offset="55%" stop-color="#a855f7" />
+      <stop offset="100%" stop-color="#ec4899" />
+    </linearGradient>
+  </defs>
+</svg>
 <header class="app-header">
   <div class="brand">
     <span class="brand-mark">✦</span>
@@ -86,6 +96,13 @@ app.innerHTML = `
       </div>
       <ul id="job-list" class="job-list"></ul>
       <p id="jobs-empty" class="muted empty">还没有任务，去「生图」写好提示词点「开始生成」。一次最多同时跑 2 个，多余的会在本地排队。</p>
+      <div id="history-box" class="history-box" hidden>
+        <button type="button" id="btn-history-toggle" class="history-toggle">
+          <span id="history-title">已完成（0 条）</span>
+          <span id="history-chevron" class="history-chevron">▸</span>
+        </button>
+        <ul id="history-list" class="job-list" hidden></ul>
+      </div>
     </div>
     <p class="footnote muted">生图走云端免费 GPU，出图后自动保存到本机，在图库里手动推送到天涯画廊。</p>
   </section>
@@ -272,24 +289,38 @@ function renderAll() {
   renderGallery();
 }
 
-function renderJobs() {
-  const jobs = getJobs();
-  jobsCountEl.textContent = jobs.length ? `${jobs.length} 条` : "";
-  jobsEmptyEl.hidden = jobs.length > 0;
-  jobListEl.innerHTML = jobs
-    .map((job) => {
-      const label = STAGE_LABELS[job.stage] || job.stage;
-      const done = job.status === "done";
-      const failed = job.status === "failed";
-      const src = done ? getThumbSrc(job) : null;
-      const snippet = esc(job.prompt.length > 60 ? job.prompt.slice(0, 60) + "…" : job.prompt);
-      const galleryLine =
-        done && job.galleryPushed === true
-          ? `<span class="ok">已推送到画廊</span>`
-          : done && job.galleryPushed === false
-            ? `<span class="warn">画廊推送失败：${esc(job.galleryError || "未知原因")}</span>`
-            : "";
-      return `<li class="job" data-id="${job.id}">
+let historyExpanded = false;
+
+function jobItemHtml(job) {
+  const label = STAGE_LABELS[job.stage] || job.stage;
+  const done = job.status === "done";
+  const failed = job.status === "failed";
+  const src = done ? getThumbSrc(job) : null;
+  const prog = getJobProgress(job);
+  const ringC = 2 * Math.PI * 26; // r=26 的圆周长
+  const ringOff = (ringC * (100 - prog.pct)) / 100;
+  const ringCls = done ? "ring-done" : failed ? "ring-failed" : "ring-run";
+  const ringCenter = done ? "✓" : failed ? "✕" : `${prog.pct}%`;
+  const snippet = esc(job.prompt.length > 60 ? job.prompt.slice(0, 60) + "…" : job.prompt);
+  const galleryLine =
+    done && job.galleryPushed === true
+      ? `<span class="ok">已推送到画廊</span>`
+      : done && job.galleryPushed === false
+        ? `<span class="warn">画廊推送失败：${esc(job.galleryError || "未知原因")}</span>`
+        : "";
+  return `<li class="job" data-id="${job.id}">
+    <div class="job-main">
+      <div class="job-progress">
+        <div class="ring-wrap ${ringCls}">
+          <svg class="ring" width="64" height="64" viewBox="0 0 64 64">
+            <circle class="ring-track" cx="32" cy="32" r="26" />
+            <circle class="ring-fill" cx="32" cy="32" r="26" stroke-dasharray="${ringC.toFixed(2)}" stroke-dashoffset="${ringOff.toFixed(2)}" transform="rotate(-90 32 32)" />
+          </svg>
+          <span class="ring-pct">${ringCenter}</span>
+        </div>
+        <span class="ring-label">${prog.label}</span>
+      </div>
+      <div class="job-info">
         <div class="job-top">
           <span class="badge">${MODEL_LABELS[job.model] ?? job.model}</span>
           <span class="job-size">${job.width}×${job.height} · ${RATIO_LABELS[job.ratioKey] ?? ""}${job.ratioKey === "auto" ? "自动" : ""}</span>
@@ -304,10 +335,47 @@ function renderJobs() {
           ${failed ? `<button type="button" class="mini-btn" data-retry="${job.id}">重新提交</button>` : ""}
           <button type="button" class="mini-btn danger" data-delete="${job.id}">删除</button>
         </div>
-      </li>`;
-    })
-    .join("");
+      </div>
+    </div>
+  </li>`;
 }
+
+function renderJobs() {
+  const jobs = getJobs();
+  // 上面只留没完的：进行中 + 失败的（失败要一眼看到、能重提）；完成了的自动收到下面仓库盒子里
+  const active = jobs.filter((j) => j.status !== "done");
+  const history = jobs.filter((j) => j.status === "done");
+  jobsCountEl.textContent = jobs.length ? `${jobs.length} 条` : "";
+  jobsEmptyEl.hidden = jobs.length > 0;
+  jobListEl.innerHTML = active.map(jobItemHtml).join("");
+  // 已完成的任务自动收到下面的小仓库，默认收起，点开看记录
+  const box = $("history-box");
+  const list = $("history-list");
+  box.hidden = history.length === 0;
+  $("history-title").textContent = `已完成（${history.length} 条）`;
+  $("history-chevron").textContent = historyExpanded ? "▾" : "▸";
+  list.hidden = !historyExpanded;
+  list.innerHTML = history.map(jobItemHtml).join("");
+}
+
+/** 每 2 秒只刷新进度环（弧长 + 百分比 + 阶段字），不整列表重绘，生成中的环会慢慢往前走。 */
+function refreshProgressRings() {
+  const jobs = getJobs();
+  for (const job of jobs) {
+    if (job.status === "done" || job.status === "failed") continue;
+    const el = document.querySelector(`.job[data-id="${job.id}"] .ring-fill`);
+    const pctEl = document.querySelector(`.job[data-id="${job.id}"] .ring-pct`);
+    const labelEl = document.querySelector(`.job[data-id="${job.id}"] .ring-label`);
+    if (!el || !pctEl || !labelEl) continue;
+    const prog = getJobProgress(job);
+    const ringC = 2 * Math.PI * 26;
+    el.setAttribute("stroke-dashoffset", ((ringC * (100 - prog.pct)) / 100).toFixed(2));
+    pctEl.textContent = `${prog.pct}%`;
+    labelEl.textContent = prog.label;
+  }
+}
+
+setInterval(refreshProgressRings, 2000);
 
 function renderGallery() {
   const done = getJobs().filter((j) => j.status === "done" && getImageSrc(j));
@@ -681,7 +749,7 @@ submitBtn.addEventListener("click", async () => {
   }
 });
 
-jobListEl.addEventListener("click", async (e) => {
+async function handleJobListClick(e) {
   const viewBtn = e.target.closest("[data-view]");
   if (viewBtn) {
     openResult(Number(viewBtn.dataset.view));
@@ -703,6 +771,13 @@ jobListEl.addEventListener("click", async (e) => {
     if (!window.confirm("确定删除这条任务吗？已保存的图片文件也会一起删掉。")) return;
     await deleteJob(Number(delBtn.dataset.delete));
   }
+}
+
+jobListEl.addEventListener("click", handleJobListClick);
+$("history-list").addEventListener("click", handleJobListClick);
+$("btn-history-toggle").addEventListener("click", () => {
+  historyExpanded = !historyExpanded;
+  renderJobs();
 });
 
 galleryGridEl.addEventListener("click", async (e) => {

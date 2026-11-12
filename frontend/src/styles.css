@@ -357,6 +357,109 @@ textarea {
   box-shadow: 0 6px 18px rgba(2, 6, 23, 0.3);
 }
 
+.job-main {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.job-progress {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.ring-wrap {
+  position: relative;
+  width: 64px;
+  height: 64px;
+}
+
+.ring {
+  display: block;
+  transform: rotate(0deg);
+}
+
+.ring-track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.16);
+  stroke-width: 5;
+}
+
+.ring-fill {
+  fill: none;
+  stroke-width: 5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.5s ease;
+}
+
+.ring-run .ring-fill {
+  stroke: url(#ring-grad);
+}
+
+.ring-done .ring-fill {
+  stroke: #34d399;
+}
+
+.ring-failed .ring-fill {
+  stroke: var(--danger);
+}
+
+.ring-pct {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.ring-label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.job-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-box {
+  margin-top: 14px;
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 16px;
+  padding: 4px 10px 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.history-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px 4px 6px;
+  border: none;
+  background: none;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.history-chevron {
+  font-size: 15px;
+  color: var(--muted);
+}
+
+.history-box .job-list {
+  margin-top: 6px;
+}
+
 .job-top {
   display: flex;
   align-items: center;

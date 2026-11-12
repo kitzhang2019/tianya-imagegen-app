@@ -253,6 +253,7 @@ async function nextJobId() {
 function updateJob(id, patch) {
   const job = jobs.find((j) => j.id === id);
   if (!job) return null;
+  if (patch.stage && patch.stage !== job.stage) patch.stageStartedAt = Date.now();
   Object.assign(job, patch);
   return job;
 }
@@ -304,6 +305,7 @@ export async function submitJob({ model, prompt, ratioKey = "auto" }) {
     createdAt: Date.now(),
     pushedAt: null,
     verifyDeadlineAt: null,
+    stageStartedAt: Date.now(),
     finishedAt: null,
     error: null,
     imagePath: null,
@@ -349,6 +351,46 @@ export function getRegenPair(job) {
   const other = jobs.find((j) => j.id === otherId);
   if (!other || other.status !== "done" || !getImageSrc(other)) return null;
   return other;
+}
+
+// 生成耗时估算（毫秒）：按参考尺寸实测时间，再按像素数缩放。只是估算，环不会卡死在 88% 以内。
+const GEN_BASE_MS = {
+  moss: { ms: 46 * 60 * 1000, px: 1696 * 2256 },
+  qwen: { ms: 75 * 1000, px: 1024 * 1024 },
+  krea2: { ms: 120 * 1000, px: 1024 * 1024 },
+  zimage: { ms: 60 * 1000, px: 1024 * 1024 },
+};
+
+function estimateGenerateMs(model, width, height) {
+  const base = GEN_BASE_MS[model] || GEN_BASE_MS.moss;
+  const px = Math.max(1, (width || 1) * (height || 1));
+  return Math.max(30 * 1000, base.ms * (px / base.px));
+}
+
+/** 任务进度：返回 { pct 0-100, label 阶段名 }。生成中按已耗时/估算推进，30%→88%。 */
+export function getJobProgress(job) {
+  if (!job) return { pct: 0, label: "" };
+  const label = STAGE_LABELS[job.stage] || job.stage || "";
+  if (job.status === "done") return { pct: 100, label: "完成" };
+  if (job.status === "failed") return { pct: 0, label: "失败" };
+  switch (job.stage) {
+    case "queued-local":
+      return { pct: 5, label };
+    case "preparing":
+      return { pct: 15, label };
+    case "queued":
+      return { pct: 25, label };
+    case "running": {
+      const since = job.stageStartedAt || job.createdAt || Date.now();
+      const est = estimateGenerateMs(job.model, job.width, job.height);
+      const frac = Math.min(1, Math.max(0, (Date.now() - since) / est));
+      return { pct: Math.round(30 + frac * 58), label };
+    }
+    case "downloading":
+      return { pct: 95, label };
+    default:
+      return { pct: 0, label };
+  }
 }
 
 /** 手动推送到画廊（图库多选推送用）：读本机图片文件，按画廊设置推送，更新任务状态。 */
