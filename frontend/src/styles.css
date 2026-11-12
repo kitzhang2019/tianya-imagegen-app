@@ -48,6 +48,8 @@ body {
 
 #app {
   min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ---------- 顶栏 ---------- */
@@ -118,24 +120,41 @@ body {
 }
 
 /* ---------- 页面与板块 ---------- */
+/* 生图、设置两页不整页滚动（像 App 不像网页），只有任务列表内部和图库可以滚。 */
 .page {
+  flex: 1;
+  min-height: 0;
   max-width: 720px;
+  width: 100%;
   margin: 0 auto;
-  padding: 18px 16px calc(118px + env(safe-area-inset-bottom));
+  padding: 16px 16px calc(96px + env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
   gap: 16px;
+  overflow: hidden;
 }
 
 .tab-page {
   display: none;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
+  min-height: 0;
+  height: 100%;
 }
 
 .tab-page.active {
   display: flex;
   animation: fadeUp 0.28s ease;
+}
+
+#tab-gallery,
+#tab-tasks {
+  overflow-y: auto;
+}
+
+#tab-generate,
+#tab-settings {
+  overflow: hidden;
 }
 
 @keyframes fadeUp {
@@ -212,7 +231,7 @@ input:focus {
 
 textarea {
   resize: vertical;
-  min-height: 120px;
+  min-height: 96px;
 }
 
 .row-between {
@@ -235,34 +254,53 @@ textarea {
   line-height: 1.55;
 }
 
-.chips {
+/* 点开选择的选择框（原生 select，iOS 上点开是系统滚轮） */
+.select-row {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
 }
 
-.chip {
-  min-height: 44px;
-  padding: 8px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--ink);
+.select-label {
+  flex: none;
+  width: 42px;
   font-size: 15px;
-  cursor: pointer;
-  transition: transform 0.12s ease, background 0.15s ease, box-shadow 0.15s ease;
+  font-weight: 600;
 }
 
-.chip:active {
-  transform: scale(0.96);
+.select-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
 }
 
-.chip.active {
-  background: linear-gradient(135deg, var(--accent1), var(--accent2) 60%, var(--accent3));
-  border-color: transparent;
-  color: #fff;
-  font-weight: 700;
-  box-shadow: 0 6px 18px rgba(168, 85, 247, 0.45);
+.glass-select {
+  width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  font-size: 16px;
+  padding: 12px 34px 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+  outline: none;
+}
+
+.glass-select:focus {
+  border-color: rgba(168, 85, 247, 0.8);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.25);
+}
+
+.select-chev {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 14px;
+  pointer-events: none;
 }
 
 .primary-btn,
@@ -532,21 +570,17 @@ textarea {
   border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
-/* ---------- 设置页 ---------- */
+/* ---------- 设置页（一页放下，不滚动） ---------- */
 .settings-card h2 {
   margin-bottom: 2px;
 }
 
-.about-card {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.settings-card .field-label {
+  margin: 12px 0 6px;
 }
 
-.about-line {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.6;
+.settings-card .section-h {
+  margin-top: 18px;
 }
 
 /* ---------- 底部毛玻璃标签栏 ---------- */
@@ -571,7 +605,7 @@ textarea {
 
 .tab-btn {
   flex: 1;
-  min-width: 92px;
+  min-width: 80px;
   min-height: 52px;
   display: flex;
   flex-direction: column;

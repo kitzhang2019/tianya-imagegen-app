@@ -47,27 +47,40 @@ app.innerHTML = `
   <section id="tab-generate" class="tab-page active">
     <div class="card glass gen-card">
       <label class="field-label" for="prompt">提示词</label>
-      <textarea id="prompt" rows="6" maxlength="${MAX_PROMPT}"
+      <textarea id="prompt" rows="4" maxlength="${MAX_PROMPT}"
         placeholder="写下你想生成的画面……比例写在提示词里也行，比如“9:16竖屏”，选“自动”时会按它来。"></textarea>
       <div class="row-between">
         <span id="prompt-count" class="muted">0 / ${MAX_PROMPT}</span>
         <span id="creds-hint" class="muted"></span>
       </div>
-      <div class="field-label">模型</div>
-      <div class="chips" id="model-chips"></div>
-      <div class="field-label">比例</div>
-      <div class="chips" id="ratio-chips"></div>
+      <div class="select-row">
+        <label class="select-label" for="model-select">模型</label>
+        <div class="select-wrap">
+          <select id="model-select" class="glass-select"></select>
+          <span class="select-chev">▾</span>
+        </div>
+      </div>
+      <div class="select-row">
+        <label class="select-label" for="ratio-select">比例</label>
+        <div class="select-wrap">
+          <select id="ratio-select" class="glass-select"></select>
+          <span class="select-chev">▾</span>
+        </div>
+      </div>
       <button id="btn-submit" class="primary-btn">开始生成</button>
       <p id="form-error" class="error" hidden></p>
     </div>
+  </section>
 
+  <!-- 任务 -->
+  <section id="tab-tasks" class="tab-page">
     <div class="card glass">
       <div class="row-between">
         <h2>任务</h2>
         <span id="jobs-count" class="muted"></span>
       </div>
       <ul id="job-list" class="job-list"></ul>
-      <p id="jobs-empty" class="muted empty">还没有任务，写好提示词点「开始生成」。Kaggle 上一次最多同时跑 2 个，多余的会在本地排队。</p>
+      <p id="jobs-empty" class="muted empty">还没有任务，去「生图」写好提示词点「开始生成」。Kaggle 上一次最多同时跑 2 个，多余的会在本地排队。</p>
     </div>
     <p class="footnote muted">生图走你自己的 Kaggle 账号（T4 免费 GPU），出图后自动保存到本机并推送到天涯画廊。Token 只存在本机设置里，不会发给任何第三方。</p>
   </section>
@@ -88,39 +101,25 @@ app.innerHTML = `
       <h2>Kaggle</h2>
       <label class="field-label" for="set-username">Kaggle 用户名</label>
       <input id="set-username" type="text" autocomplete="username" placeholder="kitzhang2019" />
-      <p class="hint">Kaggle 用户名，要和 Token 归属的账号一致。</p>
-
       <label class="field-label" for="set-token">Kaggle API Token</label>
       <input id="set-token" type="password" autocomplete="off" placeholder="KGAT 开头的 Token" />
       <p class="hint" id="token-state"></p>
-      <p class="hint">在 Kaggle 设置页 API Tokens 栏点「Generate New Token」生成；Token 约 3 小时过期，过期后重新生成再填回来。</p>
-    </div>
-
-    <div class="card glass settings-card">
-      <h2>画廊</h2>
+      <p class="hint">Token 约 3 小时过期，过期后去 Kaggle 重新生成再填回来。</p>
+      <h2 class="section-h">画廊</h2>
       <label class="field-label" for="set-gallery-key">画廊推送密钥</label>
       <input id="set-gallery-key" type="password" autocomplete="off" placeholder="天涯画廊的推送密钥" />
       <p class="hint" id="gallery-key-state"></p>
-
       <label class="field-label" for="set-gallery-url">画廊地址</label>
       <input id="set-gallery-url" type="url" inputmode="url" placeholder="https://…/upload.php" />
-      <p class="hint">留空用默认地址。一般不用改。</p>
-
       <button id="btn-save-settings" class="primary-btn">保存设置</button>
       <p id="settings-saved" class="ok" hidden>已保存。</p>
-    </div>
-
-    <div class="card glass about-card">
-      <h2>关于</h2>
-      <p class="muted about-line">天涯生图 · 只调云端 Kaggle，不占本机算力。</p>
-      <p class="muted about-line">模型：MOSS / Qwen / Krea2 / Z-Image，尺寸按比例自动算。</p>
-      <p class="muted about-line">出图保存在本机，配好画廊密钥后自动推送到天涯画廊。</p>
     </div>
   </section>
 </main>
 
 <nav class="tabbar" aria-label="主导航">
   <button type="button" class="tab-btn active" data-tab="generate"><span class="tab-ico">✦</span><span class="tab-txt">生图</span></button>
+  <button type="button" class="tab-btn" data-tab="tasks"><span class="tab-ico">☰</span><span class="tab-txt">任务</span></button>
   <button type="button" class="tab-btn" data-tab="gallery"><span class="tab-ico">▦</span><span class="tab-txt">图库</span></button>
   <button type="button" class="tab-btn" data-tab="settings"><span class="tab-ico">⚙</span><span class="tab-txt">设置</span></button>
 </nav>
@@ -184,20 +183,17 @@ function showFormError(msg) {
   formError.hidden = false;
 }
 
-function renderModelChips() {
-  $("model-chips").innerHTML = MODEL_NAMES.map(
+function populateSelects() {
+  $("model-select").innerHTML = MODEL_NAMES.map(
     (m) =>
-      `<button type="button" class="chip${m === selectedModel ? " active" : ""}" data-model="${m}">${MODEL_LABELS[m]}</button>`,
+      `<option value="${m}"${m === selectedModel ? " selected" : ""}>${MODEL_LABELS[m]}</option>`,
   ).join("");
-}
-
-function renderRatioChips() {
-  const auto = `<button type="button" class="chip${selectedRatio === "auto" ? " active" : ""}" data-ratio="auto">自动</button>`;
-  const rest = RATIO_KEYS.map(
-    (k) =>
-      `<button type="button" class="chip${k === selectedRatio ? " active" : ""}" data-ratio="${k}">${RATIO_LABELS[k]}</button>`,
-  ).join("");
-  $("ratio-chips").innerHTML = auto + rest;
+  $("ratio-select").innerHTML =
+    `<option value="auto"${selectedRatio === "auto" ? " selected" : ""}>自动</option>` +
+    RATIO_KEYS.map(
+      (k) =>
+        `<option value="${k}"${k === selectedRatio ? " selected" : ""}>${RATIO_LABELS[k]}</option>`,
+    ).join("");
 }
 
 function renderCredsHint() {
@@ -375,18 +371,12 @@ promptEl.addEventListener("input", () => {
   $("prompt-count").textContent = `${promptEl.value.length} / ${MAX_PROMPT}`;
 });
 
-$("model-chips").addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-model]");
-  if (!btn) return;
-  selectedModel = btn.dataset.model;
-  renderModelChips();
+$("model-select").addEventListener("change", (e) => {
+  selectedModel = e.target.value;
 });
 
-$("ratio-chips").addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-ratio]");
-  if (!btn) return;
-  selectedRatio = btn.dataset.ratio;
-  renderRatioChips();
+$("ratio-select").addEventListener("change", (e) => {
+  selectedRatio = e.target.value;
 });
 
 submitBtn.addEventListener("click", async () => {
@@ -410,6 +400,7 @@ submitBtn.addEventListener("click", async () => {
     promptEl.value = "";
     $("prompt-count").textContent = `0 / ${MAX_PROMPT}`;
     toast("已提交，Kaggle 排队中（一次最多同时跑 2 个）");
+    switchTab("tasks");
   } catch (e) {
     showFormError(e instanceof Error ? e.message : String(e));
   } finally {
@@ -487,8 +478,7 @@ document.addEventListener("keydown", (e) => {
 
 onJobsChange(renderAll);
 
-renderModelChips();
-renderRatioChips();
+populateSelects();
 renderAll();
 fillSettings();
 
