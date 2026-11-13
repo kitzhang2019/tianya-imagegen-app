@@ -753,6 +753,7 @@ textarea {
 .gallery-actions .primary-btn,
 .gallery-actions .secondary-btn {
   flex: none;
+  width: auto;
   min-height: 46px;
   padding: 0 18px;
   margin-top: 0;
