@@ -488,6 +488,20 @@ textarea {
   margin-left: auto;
 }
 
+.job-chevron {
+  color: var(--muted);
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+
+.job {
+  cursor: pointer;
+}
+
+.job-detail[hidden] {
+  display: none;
+}
+
 .job-prompt {
   margin: 8px 0 4px;
   font-size: 15px;

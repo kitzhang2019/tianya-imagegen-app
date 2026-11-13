@@ -293,6 +293,8 @@ function renderAll() {
 }
 
 let historyExpanded = false;
+// 任务卡片默认只显示进度头（圆环+模型+尺寸+时间），点卡片展开才看提示词和详情
+const expandedJobs = new Set();
 
 function jobItemHtml(job) {
   const label = STAGE_LABELS[job.stage] || job.stage;
@@ -305,13 +307,14 @@ function jobItemHtml(job) {
   const ringCls = done ? "ring-done" : failed ? "ring-failed" : "ring-run";
   const ringCenter = done ? "✓" : failed ? "✕" : `${prog.pct}%`;
   const snippet = esc(job.prompt.length > 60 ? job.prompt.slice(0, 60) + "…" : job.prompt);
+  const expanded = expandedJobs.has(job.id);
   const galleryLine =
     done && job.galleryPushed === true
       ? `<span class="ok">已推送到画廊</span>`
       : done && job.galleryPushed === false
         ? `<span class="warn">画廊推送失败：${esc(job.galleryError || "未知原因")}</span>`
         : "";
-  return `<li class="job" data-id="${job.id}">
+  return `<li class="job${expanded ? " expanded" : ""}" data-id="${job.id}">
     <div class="job-main">
       <div class="job-progress">
         <div class="ring-wrap ${ringCls}">
@@ -328,7 +331,9 @@ function jobItemHtml(job) {
           <span class="badge">${MODEL_LABELS[job.model] ?? job.model}</span>
           <span class="job-size">${job.width}×${job.height} · ${RATIO_LABELS[job.ratioKey] ?? ""}${job.ratioKey === "auto" ? "自动" : ""}</span>
           <span class="job-time muted">${timeAgo(job.createdAt)}</span>
+          <span class="job-chevron" aria-hidden="true">${expanded ? "▾" : "▸"}</span>
         </div>
+        <div class="job-detail" ${expanded ? "" : "hidden"}>
         <p class="job-prompt">${snippet}</p>
         <p class="job-stage ${failed ? "error" : ""}">${label}${job.stageDetail ? `：${esc(job.stageDetail)}` : ""}</p>
         ${failed && job.error ? `<p class="job-error">${esc(job.error)}</p>` : ""}
@@ -337,6 +342,7 @@ function jobItemHtml(job) {
           ${done && src ? `<button type="button" class="thumb-btn" data-view="${job.id}"><img src="${esc(src)}" alt="结果图" loading="lazy" /></button>` : ""}
           ${failed ? `<button type="button" class="mini-btn" data-retry="${job.id}">重新提交</button>` : ""}
           <button type="button" class="mini-btn danger" data-delete="${job.id}">删除</button>
+        </div>
         </div>
       </div>
     </div>
@@ -771,7 +777,18 @@ async function handleJobListClick(e) {
   const delBtn = e.target.closest("[data-delete]");
   if (delBtn) {
     if (!window.confirm("确定删除这条任务吗？已保存的图片文件也会一起删掉。")) return;
-    await deleteJob(Number(delBtn.dataset.delete));
+    const id = Number(delBtn.dataset.delete);
+    expandedJobs.delete(id);
+    await deleteJob(id);
+    return;
+  }
+  // 点卡片其他地方：展开 / 收起提示词和详情（按钮已在上面处理，不会走到这里）
+  const card = e.target.closest(".job");
+  if (card) {
+    const id = Number(card.dataset.id);
+    if (expandedJobs.has(id)) expandedJobs.delete(id);
+    else expandedJobs.add(id);
+    renderJobs();
   }
 }
 
