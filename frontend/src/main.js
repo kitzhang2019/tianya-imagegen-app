@@ -386,6 +386,24 @@ function refreshProgressRings() {
 
 setInterval(refreshProgressRings, 2000);
 
+/** 生成用时格式化：开始生成（runningStartedAt）到出图（finishedAt）的毫秒数 -> "45秒" / "46分钟" / "1小时26分钟"。 */
+function formatDuration(ms) {
+  if (!ms || ms <= 0) return "";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}秒`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}分钟`;
+  const h = Math.floor(m / 60);
+  const rest = m % 60;
+  return rest ? `${h}小时${rest}分钟` : `${h}小时`;
+}
+
+/** 一张已完成图的生成用时（开始生成 -> 出图）；没记到开始时间（改动前的旧图）返回 ""，不显示也不估算。 */
+function jobDurationLabel(job) {
+  if (!job || !job.runningStartedAt || !job.finishedAt) return "";
+  return formatDuration(job.finishedAt - job.runningStartedAt);
+}
+
 function renderGallery() {
   const done = getJobs().filter((j) => j.status === "done" && getImageSrc(j));
   galleryCountEl.textContent = done.length ? `共 ${done.length} 张` : "";
@@ -396,8 +414,10 @@ function renderGallery() {
       const pushed = job.galleryPushed === true;
       const selected = selectedGalleryIds.has(job.id);
       const isRegen = !!job.regeneratedFrom;
+      const dur = jobDurationLabel(job);
       return `<figure class="g-tile${gallerySelectMode ? " select-mode" : ""}${selected ? " selected" : ""}" data-id="${job.id}">
         <img src="${esc(src)}" alt="${esc(MODEL_LABELS[job.model] ?? job.model)} 生成图" loading="lazy" data-view="${job.id}" />
+        ${dur ? `<span class="g-duration">${esc(dur)}</span>` : ""}
         <figcaption class="g-meta" data-view="${job.id}">
           <span class="g-model">${MODEL_LABELS[job.model] ?? job.model}</span>
           <span class="g-size">${job.width}×${job.height}</span>

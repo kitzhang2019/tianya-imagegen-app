@@ -258,6 +258,10 @@ function updateJob(id, patch) {
   if (!job) return null;
   if (patch.stage && patch.stage !== job.stage) patch.stageStartedAt = Date.now();
   const stageChanged = patch.stage && patch.stage !== job.stage;
+  // 第一次进入 running 阶段时记下开始生成的时间（只记一次，之后阶段再变也不覆盖）
+  if (patch.stage === "running" && job.stage !== "running" && !job.runningStartedAt) {
+    patch.runningStartedAt = Date.now();
+  }
   Object.assign(job, patch);
   if (stageChanged && !isTerminal(job)) syncLiveActivity(job);
   return job;
@@ -428,6 +432,7 @@ export async function submitJob({ model, prompt, ratioKey = "auto" }) {
     pushedAt: null,
     verifyDeadlineAt: null,
     stageStartedAt: Date.now(),
+    runningStartedAt: null, // 开始生成的时间（第一次进入 running 阶段才记，只记一次）；用于算“开始生成到出图”的用时
     finishedAt: null,
     error: null,
     imagePath: null,

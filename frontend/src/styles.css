@@ -651,6 +651,25 @@ textarea {
   object-fit: cover;
 }
 
+/* 生成用时角标：成品图左上角（重新生成按钮下方），小字 + 半透明底，不挡主体 */
+.g-duration {
+  position: absolute;
+  top: 46px;
+  left: 8px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(11, 15, 25, 0.6);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.4;
+  font-weight: 600;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
 .g-meta {
   position: absolute;
   left: 0;
