@@ -5,6 +5,7 @@ import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { Directory, Filesystem } from "@capacitor/filesystem";
 import { LocalNotifications } from "@capacitor/local-notifications";
+import { LiveActivities } from "@ciabosoftwaresolutions/capacitor-live-activities";
 import {
   MODEL_LABELS,
   NOTEBOOK_KINDS,
@@ -256,7 +257,9 @@ function updateJob(id, patch) {
   const job = jobs.find((j) => j.id === id);
   if (!job) return null;
   if (patch.stage && patch.stage !== job.stage) patch.stageStartedAt = Date.now();
+  const stageChanged = patch.stage && patch.stage !== job.stage;
   Object.assign(job, patch);
+  if (stageChanged && !isTerminal(job)) syncLiveActivity(job);
   return job;
 }
 
@@ -279,6 +282,102 @@ async function notifyJob(job, ok) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Live Activities（锁屏 / 灵动岛常驻进度 + 当前步骤）
+// ---------------------------------------------------------------------------
+// 只在真机 iOS 16.2+ 上生效；不支持的设备上 isSupported() 为 false，直接跳过。
+// 进度条与步骤文案：title=模型名，subtitle="步骤 · 进度%"，progress=0-1，
+// timerEnd=预计完成时间（倒计时系统自己走，App 挂起后也继续；进度%则只在
+// App 运行时更新）。失败不影响任务本身，全部 try/catch 包住。
+const liveSyncAt = new Map(); // jobId -> 上次同步时间戳（节流用）
+const LIVE_SYNC_MIN_MS = 15000; // 同步间隔下限 15 秒（阶段变化时立即同步）
+
+function liveStateFor(job) {
+  const { pct, label } = getJobProgress(job);
+  const estTotalMs = estimateGenerateMs(job.model, job.width, job.height) + 5 * 60 * 1000;
+  return {
+    title: MODEL_LABELS[job.model] ?? job.model,
+    subtitle: `${label || "处理中"} · ${pct}%`,
+    progress: Math.min(1, Math.max(0, pct / 100)),
+    timerEnd: Math.round((job.createdAt + estTotalMs) / 1000),
+    timerStart: Math.round(job.createdAt / 1000),
+    timerCountsDown: false,
+    progressColor: "#a855f7",
+    backgroundColor: "#1a1a2e",
+  };
+}
+
+async function startLiveActivity(job) {
+  try {
+    if (!Capacitor.isNativePlatform()) return;
+    const { supported } = await LiveActivities.isSupported();
+    if (!supported) return;
+    const { activityId } = await LiveActivities.start({
+      attributes: { activityType: "tianya-imagegen" },
+      state: liveStateFor(job),
+    });
+    job.liveActivityId = activityId;
+    liveSyncAt.set(job.id, Date.now());
+    await saveJobs();
+  } catch {
+    // Live Activity 不可用不影响任务本身
+  }
+}
+
+async function syncLiveActivity(job, force = false) {
+  try {
+    if (!Capacitor.isNativePlatform()) return;
+    if (!job || isTerminal(job)) return;
+    const last = liveSyncAt.get(job.id) || 0;
+    const stageChanged = job.stage !== (job._lastLiveStage || null);
+    if (!force && !stageChanged && Date.now() - last < LIVE_SYNC_MIN_MS) return;
+    job._lastLiveStage = job.stage;
+    const state = liveStateFor(job);
+    if (job.liveActivityId) {
+      try {
+        await LiveActivities.update({ activityId: job.liveActivityId, state });
+        liveSyncAt.set(job.id, Date.now());
+        return;
+      } catch {
+        // 旧活动已不存在（App 重启后），下面重新开一个
+      }
+    }
+    const { supported } = await LiveActivities.isSupported();
+    if (!supported) return;
+    const { activityId } = await LiveActivities.start({
+      attributes: { activityType: "tianya-imagegen" },
+      state,
+    });
+    job.liveActivityId = activityId;
+    liveSyncAt.set(job.id, Date.now());
+    await saveJobs();
+  } catch {
+    // 同步失败不影响任务本身
+  }
+}
+
+async function endLiveActivity(job, ok) {
+  try {
+    if (!Capacitor.isNativePlatform()) return;
+    if (!job.liveActivityId) return;
+    const { pct, label } = getJobProgress(job);
+    await LiveActivities.end({
+      activityId: job.liveActivityId,
+      finalState: {
+        title: MODEL_LABELS[job.model] ?? job.model,
+        subtitle: ok ? `完成 · ${pct}%` : `${label || "失败"}`,
+        progress: ok ? 1 : 0,
+      },
+      dismissalPolicy: "default",
+    });
+  } catch {
+    // 结束失败不影响任务本身
+  } finally {
+    job.liveActivityId = null;
+    liveSyncAt.delete(job.id);
+  }
+}
+
 async function failJob(job, message) {
   updateJob(job.id, {
     status: "failed",
@@ -289,6 +388,7 @@ async function failJob(job, message) {
   });
   await saveJobs();
   notifyJob(job, false);
+  endLiveActivity(job, false);
   pumpQueue();
 }
 
@@ -336,12 +436,14 @@ export async function submitJob({ model, prompt, ratioKey = "auto" }) {
     galleryError: null,
     regeneratedFrom: null, // 重新生成时，指向原图任务 id
     regeneratedBy: null, // 被重新生成时，指向新图任务 id
+    liveActivityId: null, // 锁屏 / 灵动岛常驻活动的 id（仅本机，不进画廊）
     outputResumeToken: null,
     outputScanned: 0,
     downloadStartedAt: null,
   };
   jobs.unshift(job);
   await saveJobs();
+  startLiveActivity(job);
   pumpQueue();
   return job;
 }
@@ -702,6 +804,7 @@ async function finishJob(job, url = null) {
     });
     await saveJobs();
     notifyJob(job, true);
+    endLiveActivity(job, true);
 
     // 不自动推送画廊：图只保存在本机，用户在图库里手动多选推送。
   } catch (e) {
@@ -819,6 +922,8 @@ async function tick() {
       }
     }
   }
+  // 每轮顺带同步一次常驻活动的进度（内部 15 秒节流；阶段变化时 updateJob 里已立即同步）
+  for (const job of jobs.filter(isActive)) syncLiveActivity(job);
 }
 
 export function startPolling() {

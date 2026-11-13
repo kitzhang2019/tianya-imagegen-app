@@ -1,9 +1,10 @@
 node_modules/
 dist/
-ios/
 android/
 .env
 .env.local
 *.local
 *.log
 .DS_Store
+# 注意：frontend/ios/ 已提交进仓库（2026-11-13，Live Activities 需要 Widget Extension 目标，
+# 必须把 iOS 工程放进 git，CI 才用得到；里面的构建产物仍由 ios/.gitignore 忽略）。
