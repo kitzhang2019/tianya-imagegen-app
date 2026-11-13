@@ -115,7 +115,7 @@ app.innerHTML = `
       <span id="gallery-count" class="muted"></span>
       <div class="gallery-head-actions">
         <button id="btn-select-mode" class="mini-btn" type="button">选择</button>
-        <button id="btn-gallery-push" class="mini-btn primary" type="button" hidden>推送到画廊</button>
+        <button id="btn-gallery-push" class="mini-btn primary" type="button">推送到画廊</button>
       </div>
     </div>
     <div id="gallery-grid" class="gallery-grid"></div>
@@ -407,10 +407,8 @@ function renderGallery() {
 
 function updateGalleryActions() {
   $("gallery-actions").hidden = !gallerySelectMode;
-  $("btn-gallery-push").hidden = !gallerySelectMode;
   $("gallery-selected-count").textContent = selectedGalleryIds.size ? `已选 ${selectedGalleryIds.size} 张` : "未选图片";
   $("btn-gallery-share").disabled = selectedGalleryIds.size === 0;
-  $("btn-gallery-push").disabled = selectedGalleryIds.size === 0;
 }
 
 function enterSelectMode() {
@@ -846,7 +844,7 @@ $("btn-share-sheet-cancel").addEventListener("click", () => {
 $("btn-gallery-push").addEventListener("click", async () => {
   const ids = [...selectedGalleryIds];
   if (!ids.length) {
-    toast("先选几张图");
+    toast("请选择图片推送到画廊");
     return;
   }
   if (!getSettings().galleryKey) {
