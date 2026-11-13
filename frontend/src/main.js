@@ -5,6 +5,7 @@
 import "./styles.css";
 import { Capacitor } from "@capacitor/core";
 import { Directory, Filesystem } from "@capacitor/filesystem";
+import { LocalNotifications } from "@capacitor/local-notifications";
 import { Share } from "@capacitor/share";
 import {
   MODEL_LABELS,
@@ -112,14 +113,16 @@ app.innerHTML = `
     <div class="gallery-head">
       <h2>图库</h2>
       <span id="gallery-count" class="muted"></span>
-      <button id="btn-select-mode" class="mini-btn" type="button">选择</button>
+      <div class="gallery-head-actions">
+        <button id="btn-select-mode" class="mini-btn" type="button">选择</button>
+        <button id="btn-gallery-push" class="mini-btn primary" type="button" hidden>推送到画廊</button>
+      </div>
     </div>
     <div id="gallery-grid" class="gallery-grid"></div>
     <p id="gallery-empty" class="muted empty">还没有出图。去「生图」写一段提示词，生成的第一张图就会出现在这里。</p>
     <div id="gallery-actions" class="gallery-actions" hidden>
       <span id="gallery-selected-count" class="muted"></span>
       <button id="btn-gallery-share" class="secondary-btn" type="button">分享</button>
-      <button id="btn-gallery-push" class="primary-btn" type="button">推送到画廊</button>
     </div>
   </section>
 
@@ -404,6 +407,7 @@ function renderGallery() {
 
 function updateGalleryActions() {
   $("gallery-actions").hidden = !gallerySelectMode;
+  $("btn-gallery-push").hidden = !gallerySelectMode;
   $("gallery-selected-count").textContent = selectedGalleryIds.size ? `已选 ${selectedGalleryIds.size} 张` : "未选图片";
   $("btn-gallery-share").disabled = selectedGalleryIds.size === 0;
   $("btn-gallery-push").disabled = selectedGalleryIds.size === 0;
@@ -977,6 +981,11 @@ onJobsChange(renderAll);
 
 populateSelects();
 renderAll();
+
+// 生成完成/失败的系统通知：首次打开时请求一次通知权限（用户拒绝也不影响生图本身）
+if (Capacitor.isNativePlatform()) {
+  LocalNotifications.requestPermissions().catch(() => {});
+}
 
 initJobs().catch((e) => {
   toast(`初始化失败：${e instanceof Error ? e.message : String(e)}`);

@@ -4,7 +4,9 @@
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { Directory, Filesystem } from "@capacitor/filesystem";
+import { LocalNotifications } from "@capacitor/local-notifications";
 import {
+  MODEL_LABELS,
   NOTEBOOK_KINDS,
   base64ToBytes,
   bytesToBase64,
@@ -258,6 +260,25 @@ function updateJob(id, patch) {
   return job;
 }
 
+/** 生成完成/失败后发一条系统通知（App 在前台或后台运行时才触发；被系统挂起后等下次打开 App 轮询到结果时再补发）。 */
+async function notifyJob(job, ok) {
+  try {
+    if (!Capacitor.isNativePlatform()) return;
+    const label = MODEL_LABELS[job.model] ?? job.model;
+    await LocalNotifications.schedule({
+      notifications: [
+        {
+          id: job.id,
+          title: ok ? "出图完成" : "生成失败",
+          body: ok ? `${label} 已出图，点开查看` : `${label} 生成失败，点开查看原因`,
+        },
+      ],
+    });
+  } catch {
+    // 通知发不出去不影响任务本身
+  }
+}
+
 async function failJob(job, message) {
   updateJob(job.id, {
     status: "failed",
@@ -267,6 +288,7 @@ async function failJob(job, message) {
     finishedAt: Date.now(),
   });
   await saveJobs();
+  notifyJob(job, false);
   pumpQueue();
 }
 
@@ -679,6 +701,7 @@ async function finishJob(job, url = null) {
       downloadStartedAt: null,
     });
     await saveJobs();
+    notifyJob(job, true);
 
     // 不自动推送画廊：图只保存在本机，用户在图库里手动多选推送。
   } catch (e) {

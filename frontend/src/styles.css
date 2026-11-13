@@ -535,6 +535,19 @@ textarea {
 .mini-btn.danger {
   color: var(--danger);
 }
+.mini-btn.primary {
+  background: linear-gradient(135deg, var(--accent1), var(--accent2) 55%, var(--accent3));
+  color: #fff;
+  border: none;
+}
+.mini-btn.primary:disabled {
+  opacity: 0.55;
+}
+.gallery-head-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
 
 .thumb-btn {
   padding: 0;
