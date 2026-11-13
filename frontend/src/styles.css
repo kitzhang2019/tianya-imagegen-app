@@ -1,5 +1,16 @@
 /* 天涯视界 — iOS 毛玻璃（Liquid Glass）风格，移动端优先，单页应用 */
 
+/* 品牌标题字体：跟 App 图标上的「天涯」同款粗黑体（Noto Sans SC Bold，
+   只含天涯视界 4 字，1.5KB，本地文件，不走网络）。 */
+@font-face {
+  font-family: "Tianya Brand";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/noto-sans-sc-700-tianya.woff2") format("woff2");
+  unicode-range: U+5929, U+6DAF, U+754C, U+89C6; /* 天涯视界 */
+}
+
 :root {
   --bg: #0b0f19;
   --ink: #f1f5f9;
@@ -94,8 +105,9 @@ body {
 
 .brand-text h1 {
   margin: 0;
+  font-family: "Tianya Brand", -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 20px;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: 1px;
 }
 
