@@ -35,11 +35,14 @@ copyFileSync(darkSrc, darkDst);
 const contents = {
   images: [
     {
+      // 亮色条目不带 appearances（就是默认图标，和 @capacitor/assets
+      // 生成的格式一字不差）。之前给亮色也加了 luminosity:light，
+      // actool 直接把两条都当成未分配（unassigned），编出来的包没有
+      // 可用图标，装上就是白色网格——v0.8.9 的教训。
       idiom: 'universal',
       size: '1024x1024',
       filename: 'AppIcon-512@2x.png',
       platform: 'ios',
-      appearances: [{ appearance: 'luminosity', value: 'light' }],
     },
     {
       idiom: 'universal',
