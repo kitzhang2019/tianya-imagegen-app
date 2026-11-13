@@ -135,10 +135,11 @@ jobs:
         # @capacitor/assets is a devDependency (installed by npm ci).
         run: npx @capacitor/assets generate --ios
 
-      - name: Apply iOS dark-mode app icon
-        # @capacitor/assets has no icon-dark input: generate rebuilds the
-        # appiconset from icon.png only and would wipe the dark variant.
-        # This re-adds frontend/assets/icon-dark.png as the dark entry
+      - name: Apply iOS dark + tinted app icons
+        # @capacitor/assets has no icon-dark/icon-tinted input: generate
+        # rebuilds the appiconset from icon.png only and would wipe the
+        # variants. This re-adds frontend/assets/icon-dark.png (dark) and
+        # icon-tinted.png (transparent/tinted, drives iOS 26 Clear mode)
         # (see frontend/scripts/apply-ios-dark-icon.mjs).
         run: node scripts/apply-ios-dark-icon.mjs
 
