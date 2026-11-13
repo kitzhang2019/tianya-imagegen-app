@@ -135,6 +135,13 @@ jobs:
         # @capacitor/assets is a devDependency (installed by npm ci).
         run: npx @capacitor/assets generate --ios
 
+      - name: Apply iOS dark-mode app icon
+        # @capacitor/assets has no icon-dark input: generate rebuilds the
+        # appiconset from icon.png only and would wipe the dark variant.
+        # This re-adds frontend/assets/icon-dark.png as the dark entry
+        # (see frontend/scripts/apply-ios-dark-icon.mjs).
+        run: node scripts/apply-ios-dark-icon.mjs
+
       - name: Archive (unsigned, device build)
         # Capacitor 8 uses the Swift Package Manager template, which does
         # NOT generate App.xcworkspace (that is a CocoaPods-era file).
