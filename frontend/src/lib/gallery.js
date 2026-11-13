@@ -9,6 +9,9 @@
 //   CapFormDataEntry，以及 iOS CapacitorUrlRequest.getRequestDataFromFormData
 //   / Android CapacitorHttpUrlConnection.writeFormDataRequestBody），图片
 //   以 base64 传过去由原生端解码拼 multipart。走的就是这条路。
+//   注意：必须带 Content-Type: multipart/form-data 头，否则原生端
+//   setRequestBody 见到空 Content-Type 直接返回、不拼请求体，服务器收不到
+//   multipart，报「需要 multipart 表单」（2026-11-13 真机实测教训）。
 // - 桌面浏览器：CapacitorHttp 的 web 实现走 fetch，改用真实 FormData +
 //   fetch；但 upload.php 不发 CORS 头，桌面浏览器会被跨域拦住——这是
 //   桌面调试的限制，真机（原生 HTTP，不走 CORS）不受影响。
@@ -61,6 +64,11 @@ export async function pushToGallery({ url, key, job, pngBytes, fileName }) {
         method: "POST",
         data: entries,
         dataType: "formData",
+        // 必须带 Content-Type 头：iOS/Android 原生端没有它就不拼请求体
+        // （setRequestBody 见到空 Content-Type 直接返回），服务器就收不到
+        // multipart，报「需要 multipart 表单」。原生端收到后会自动补上
+        // boundary（overrideContentType），不用这里写死。
+        headers: { "Content-Type": "multipart/form-data" },
         connectTimeout: 15000,
         readTimeout: 60000,
         responseType: "json",
