@@ -682,10 +682,11 @@ async function shareJobs(jobIds, action) {
   try {
     const uris = [];
     for (const job of jobs) {
+      const srcPath = `images/${job.imageFileName}`;
       const cacheUri = await Filesystem.getUri({ path: job.imageFileName, directory: Directory.Cache });
       try {
         await Filesystem.copy({
-          from: job.imageFileName,
+          from: srcPath,
           to: job.imageFileName,
           directory: Directory.Data,
           toDirectory: Directory.Cache,
