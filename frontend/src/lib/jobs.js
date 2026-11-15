@@ -51,6 +51,7 @@ const DOWNLOAD_BACKSTOP_MS = 10 * 60 * 1000; // downloading 重试超过 10 分�
 const RECONCILE_AFTER_MS = 20 * 60 * 1000; // queued/running 超过 20 分钟就探输出列表
 const QUEUE_ALLOWANCE_MS = 5 * 60 * 1000; // 预估总时长里的排队留量（与 Live Activities 预计完成时间同一口径）
 export const QUEUE_CHECK_INTERVAL_MS = 10 * 60 * 1000; // 排队超时后自动核查的刷新间隔：约 10 分钟再查一次
+export const QUEUE_CHECK_AFTER_MS = 30 * 60 * 1000; // 排队核查的触发：进排队超过 30 分钟就核查（绝对时长，四模型统一；不再按预估总时长算）
 const PROBE_BUDGET_MS = 50000;
 const FIND_BUDGET_MS = 150000;
 
@@ -579,19 +580,21 @@ function estimateGenerateMs(model, width, height) {
   return Math.max(30 * 1000, base.ms * (px / base.px));
 }
 
-/** 预估总时长（毫秒）：生成估算 + 5 分钟排队留量。与 Live Activities 的
- * 预计完成时间（timerEnd = createdAt + 预估总时长）同一口径；“已超时”就
- * 是现在超过了这个预计完成时间。预估算法本身不动，这里只复用它。 */
+/** 预估总时长（毫秒）：生成估算 + 5 分钟排队留量。Live Activities 的
+ * 预计完成时间（timerEnd = createdAt + 预估总时长）用这个口径，预估算法
+ * 本身不动；排队自动核查的触发不再用它（见 QUEUE_CHECK_AFTER_MS）。 */
 export function estimateTotalMs(job) {
   return estimateGenerateMs(job.model, job.width, job.height) + QUEUE_ALLOWANCE_MS;
 }
 
-/** 是不是“排队已超时”：处在排队阶段，且从提交起已超过预估总时长。
- * 注意是超过预估，不是触到 6 小时排队硬上限。 */
+/** 是不是“排队已超时”：处在排队阶段，且从进排队起已超过 30 分钟。
+ * 绝对时长，四模型统一；不再按预估总时长算（MOSS 一单预估约 80 分钟，
+ * 排队 50 分钟也触发不了）。进排队时间以 stageStartedAt 为准（切 stage
+ * 时更新），没有就退回 createdAt。6 小时排队硬上限另算。 */
 export function isQueueOverdue(job, now = Date.now()) {
   if (!job || job.stage !== "queued") return false;
-  const since = job.createdAt || now;
-  return now - since > estimateTotalMs(job);
+  const since = job.stageStartedAt || job.createdAt || now;
+  return now - since > QUEUE_CHECK_AFTER_MS;
 }
 
 /** 核查结论 -> 括号备注文案（北京时间 HH:MM）。结论只有四种：
@@ -635,7 +638,7 @@ export async function performQueueCheck(job, client, knownState) {
   return null;
 }
 
-/** 该核查就核查一次：只在排队阶段、已超时、距上次核查 ≥ 约 10 分钟时
+/** 该核查就核查一次：只在排队阶段、进排队超 30 分钟、距上次核查 ≥ 约 10 分钟时
  * 跑；核查完把时间（queueCheckAt）和备注（queueCheckNote）存进任务
  * （随任务持久化，不只放内存），返回备注文案；不该查或问不到返回 null。
  * 离开排队阶段后不再调用，旧备注留在任务记录里不再更新。 */

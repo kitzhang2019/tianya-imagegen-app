@@ -1,12 +1,14 @@
-// tests/jobs-queue-check.test.mjs — 排队超时自动核查测试：已超时才核查、
-// 三种核查结论的括号备注文案、未超时不核查、10 分钟内不重复核查、
-// 10 分钟后刷新、离开排队后停止刷新；上次核查时间随任务持久化。
+// tests/jobs-queue-check.test.mjs — 排队超时自动核查测试：进排队超 30 分钟
+// 才核查（绝对时长，四模型统一；不再按预估总时长算）、三种核查结论的
+// 括号备注文案、未超时不核查、10 分钟内不重复核查、10 分钟后刷新、
+// 离开排队后停止刷新；上次核查时间随任务持久化。
 // 跑法：npm test。fetch 桩模拟 Kaggle API：GetKernelSessionStatus /
 // ListKernelSessionOutput 按 fake 的设定应答。
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { __seedStore, __readStore, __resetStore } from "./stubs/capacitor-preferences.mjs";
 import {
+  QUEUE_CHECK_AFTER_MS,
   __tickForTest,
   deleteJob,
   estimateTotalMs,
@@ -105,10 +107,11 @@ function persistedJobById(id) {
   return list.find((j) => j.id === id);
 }
 
-/** 把一单改成“已排 30 分钟”：qwen 1024×1536 的预估总时长约 6.9 分钟，30 分钟必超时。 */
+/** 把一单改成“进排队 31 分钟”：超过 30 分钟触发线（正好 30 分钟不触发，
+ * 判定是严格大于）。 */
 function makeOverdue(id) {
   const job = jobById(id);
-  const past = Date.now() - 30 * 60 * 1000;
+  const past = Date.now() - 31 * 60 * 1000;
   job.createdAt = past;
   job.pushedAt = past;
   job.stageStartedAt = past;
@@ -128,15 +131,38 @@ test("括号备注文案：四种结论 + 北京时间", () => {
   );
 });
 
-test("isQueueOverdue：只看排队阶段 + 超过预估总时长", () => {
+test("isQueueOverdue：只看排队阶段 + 进排队超 30 分钟（绝对时长）", () => {
   const now = Date.now();
-  const base = { model: "qwen", width: 1024, height: 1536 };
-  const est = estimateTotalMs(base);
-  assert.ok(est > 6 * 60 * 1000 && est < 8 * 60 * 1000); // 约 6.9 分钟
-  assert.equal(isQueueOverdue({ ...base, stage: "queued", createdAt: now - est - 1000 }, now), true);
-  assert.equal(isQueueOverdue({ ...base, stage: "queued", createdAt: now - est + 60 * 1000 }, now), false);
-  assert.equal(isQueueOverdue({ ...base, stage: "running", createdAt: now - est - 1000 }, now), false);
-  assert.equal(isQueueOverdue({ ...base, stage: "queued-local", createdAt: now - est - 1000 }, now), false);
+  assert.equal(QUEUE_CHECK_AFTER_MS, 30 * 60 * 1000);
+  // 预估算法本身不动：qwen 1024×1536 的预估总时长仍约 6.9 分钟，
+  // 只是不再拿它当核查触发条件（Live Activities 的预计完成时间照旧用它）
+  const est = estimateTotalMs({ model: "qwen", width: 1024, height: 1536 });
+  assert.ok(est > 6 * 60 * 1000 && est < 8 * 60 * 1000);
+  const base = { model: "qwen", width: 1024, height: 1536, stage: "queued" };
+  // 29 分钟不核查，31 分钟核查；正好 30 分钟也不触发（严格大于）
+  assert.equal(isQueueOverdue({ ...base, stageStartedAt: now - 29 * 60 * 1000 }, now), false);
+  assert.equal(isQueueOverdue({ ...base, stageStartedAt: now - 30 * 60 * 1000 }, now), false);
+  assert.equal(isQueueOverdue({ ...base, stageStartedAt: now - 31 * 60 * 1000 }, now), true);
+  // 进排队时间以 stageStartedAt 为准：提交 60 分钟前、进排队才 10 分钟，不核查
+  assert.equal(
+    isQueueOverdue(
+      { ...base, createdAt: now - 60 * 60 * 1000, stageStartedAt: now - 10 * 60 * 1000 },
+      now,
+    ),
+    false,
+  );
+  // 老任务没有 stageStartedAt 时退回 createdAt
+  assert.equal(
+    isQueueOverdue({ ...base, createdAt: now - 31 * 60 * 1000, stageStartedAt: undefined }, now),
+    true,
+  );
+  // 不在排队阶段：再久也不核查
+  assert.equal(isQueueOverdue({ ...base, stage: "running", stageStartedAt: now - 31 * 60 * 1000 }, now), false);
+  assert.equal(isQueueOverdue({ ...base, stage: "queued-local", stageStartedAt: now - 31 * 60 * 1000 }, now), false);
+  // MOSS 一单预估约 80 分钟：以前排队 50 分钟触发不了，现在 31 分钟就能触发
+  const moss = { model: "moss", width: 2048, height: 3072, stage: "queued" };
+  assert.ok(estimateTotalMs(moss) > 60 * 60 * 1000);
+  assert.equal(isQueueOverdue({ ...moss, stageStartedAt: now - 50 * 60 * 1000 }, now), true);
 });
 
 test("预置任务并启动轮询", async () => {
@@ -170,7 +196,7 @@ test("未超时不核查", async () => {
   fake.status = "queued";
   fake.outputFiles = [];
   await __tickForTest();
-  const job = jobById(101); // createdAt 就是现在，远没到预估总时长
+  const job = jobById(101); // createdAt 就是现在，进排队才 0 分钟，远没到 30 分钟
   assert.equal(job.status, "queued");
   assert.equal(job.queueCheckAt, null);
   assert.equal(job.queueCheckNote, null);
