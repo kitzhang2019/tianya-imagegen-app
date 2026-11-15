@@ -9,6 +9,12 @@ import { base64ToBytes, bytesToBase64, utf8ToBase64 } from "./notebook.js";
 
 export const KAGGLE_RELAY_BASE = "https://kaggle.tianyagk.dpdns.org";
 export const KAGGLE_API_BASE = `${KAGGLE_RELAY_BASE}/api/v1`;
+
+// 浏览器 UA：中转域名所在 zone 开了 Cloudflare Browser Integrity Check，
+// App 原生请求默认的 CFNetwork UA 会被当成非浏览器流量拦下；改发桌面
+// Chrome UA（与中转上游同款），让请求看起来像浏览器流量。
+export const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 export const MOODY_DATASET_SLUG = "moody-moss-mix-v33";
 export const MOODY_MODEL_FILE =
   "Moody-Moss-Mix-V3.3_00001__clean-int8_convrot.safetensors";
@@ -135,7 +141,9 @@ async function httpRequest({ url, method = "GET", headers = {}, body = null, tim
     const res = await CapacitorHttp.request({
       url,
       method,
-      headers,
+      // 原生请求改发浏览器 UA（见 BROWSER_USER_AGENT）：中转域名开了
+      // Cloudflare Browser Integrity Check，CFNetwork UA 会被拦。
+      headers: { ...headers, "User-Agent": BROWSER_USER_AGENT },
       data: body ?? undefined,
       connectTimeout: Math.min(timeoutMs, 15000),
       readTimeout: timeoutMs,

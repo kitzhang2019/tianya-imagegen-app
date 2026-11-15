@@ -927,7 +927,7 @@ async function runJob(job) {
       updateJob(job.id, {
         status: "preparing",
         stage: "confirming",
-        stageDetail: "网络暂时断开，正在重连…（已提交的任务不会重复推）",
+        stageDetail: `网络暂时断开，正在重连…（已提交的任务不会重复推；${String(preChk.detail ?? "").slice(0, 120)}）`,
       });
       await saveJobs();
       return;
@@ -943,12 +943,13 @@ async function runJob(job) {
     } catch (e) {
       // push 请求本身因网络断开拿不到回包：请求可能已到云端建出 kernel，
       // 绝不能标失败——进待确认，等网络恢复后按 slug 查状态再决定
-      if (isNetworkErrorText(e instanceof Error ? e.message : String(e))) {
+      const pushMsg = e instanceof Error ? e.message : String(e);
+      if (isNetworkErrorText(pushMsg)) {
         setNetworkDown(true);
         updateJob(job.id, {
           status: "preparing",
           stage: "confirming",
-          stageDetail: "网络暂时断开，正在重连…（已提交的任务不会重复推）",
+          stageDetail: `网络暂时断开，正在重连…（已提交的任务不会重复推；${pushMsg.slice(0, 120)}）`,
         });
         await saveJobs();
         return;
@@ -987,7 +988,7 @@ async function runJob(job) {
         updateJob(job.id, {
           status: "preparing",
           stage: "confirming",
-          stageDetail: "网络暂时断开，正在重连…（已提交的任务不会重复推）",
+          stageDetail: `网络暂时断开，正在重连…（已提交的任务不会重复推；${msg.slice(0, 120)}）`,
         });
         await saveJobs();
       } else {
@@ -1155,7 +1156,7 @@ async function tick() {
             setNetworkDown(true);
             updateJob(job.id, {
               stage: "confirming",
-              stageDetail: "网络暂时断开，正在重连…（已提交的任务不会重复推）",
+              stageDetail: `网络暂时断开，正在重连…（已提交的任务不会重复推；${String(chk.detail ?? "").slice(0, 120)}）`,
             });
             await saveJobs();
           } else {
