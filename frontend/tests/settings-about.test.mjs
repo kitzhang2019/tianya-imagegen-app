@@ -49,10 +49,10 @@ test("版本号从 package.json 注入，不手写死数字", () => {
   // main.js 用注入值填版本行，带 typeof 守卫（define 缺失时不报错）
   assert.match(mainJs, /typeof __APP_VERSION__ !== "undefined"/);
   assert.match(mainJs, /appVersionEl\.textContent = __APP_VERSION__/);
-  // 注入源与包版本一致：当前应为 1.2.4
-  assert.equal(pkg.version, "1.2.4");
+  // 注入源与包版本一致：当前应为 1.2.5
+  assert.equal(pkg.version, "1.2.5");
   // main.js 里不出现手写死的版本号文本
-  assert.doesNotMatch(mainJs, />1\.2\.4</);
+  assert.doesNotMatch(mainJs, />1\.2\.5</);
 });
 
 test("关于卡片样式：两行对齐，GitHub 长地址可断行", () => {

@@ -1,4 +1,4 @@
-// kaggle.js — Kaggle API 客户端（Kaggle 直连，与管理站 actions.ts 的
+// kaggle.js — Kaggle API 客户端（经 Cloudflare 中转调 Kaggle，与管理站 actions.ts 的
 // kagglePushKernel / kaggleKernelStatus / kaggleFindOutputFile /
 // kaggleAuthHeader / kaggleErrorDetail / runKaggleDirectSubmission 同款逻辑）。
 // 传输层：在真机上用 CapacitorHttp（原生 HTTP，绕过 CORS）；在桌面浏览器
@@ -7,7 +7,8 @@
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { base64ToBytes, bytesToBase64, utf8ToBase64 } from "./notebook.js";
 
-export const KAGGLE_API_BASE = "https://www.kaggle.com/api/v1";
+export const KAGGLE_RELAY_BASE = "https://kaggle.tianyagk.dpdns.org";
+export const KAGGLE_API_BASE = `${KAGGLE_RELAY_BASE}/api/v1`;
 export const MOODY_DATASET_SLUG = "moody-moss-mix-v33";
 export const MOODY_MODEL_FILE =
   "Moody-Moss-Mix-V3.3_00001__clean-int8_convrot.safetensors";
@@ -183,6 +184,28 @@ async function httpRequest({ url, method = "GET", headers = {}, body = null, tim
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Kaggle 签名下载地址走中转：kaggleusercontent.com（含子域名）或
+ * storage.googleapis.com 的 host 改写成中转 /dl?url=，其余 host 保持直连。
+ * 中转只转发、不存凭据；下载本身不带 Authorization。
+ */
+export function relayDownloadUrl(url) {
+  let parsed = null;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const viaRelay =
+    host === "kaggleusercontent.com" ||
+    host.endsWith(".kaggleusercontent.com") ||
+    host === "storage.googleapis.com";
+  return viaRelay
+    ? `${KAGGLE_RELAY_BASE}/dl?url=${encodeURIComponent(url)}`
+    : url;
 }
 
 export class KaggleClient {
@@ -375,6 +398,7 @@ export class KaggleClient {
     if (!parsed || parsed.protocol !== "https:") {
       throw new KaggleError("Kaggle 给的结果下载地址不是有效的 https 地址");
     }
+    url = relayDownloadUrl(url);
     let lastError = "";
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
