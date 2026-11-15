@@ -165,6 +165,9 @@ export const KREA2_LORA = {
 // Krea2 主模型：Ray Artshoot v5 nvfp4（2026-11-15，App 与管理站/磁盘模板同步，
 // 旧 GGUF Q5_K_M 已弃用）。模板从该私有数据集里取模型文件，Krea2 单必挂。
 export const KREA2_RAY_DATASET = "kitzhang2019/ray-artshoot-krea2-v5-nvfp4";
+// Z-Image 主模型：PornMaster Turbo V3.5 fp8（2026-11-15，App 与管理站/磁盘模板同步，
+// 旧官方 Turbo 已弃用）。模板从该私有数据集里取模型文件，Z-Image 单必挂。
+export const ZIMAGE_MAIN_DATASET = "kitzhang2019/pornmaster-zimage-v35-fp8";
 // SeedVR 7B 放大模型（2026-11-15，四模板同步 SeedVR 第二段）：DiT + VAE 走私有
 // 数据集，模板下载格从 /kaggle/input 软链进 ComfyUI/models/SEEDVR2/。四模型都挂。
 export const SEEDVR_DATASET = "kitzhang2019/seedvr2-7b";

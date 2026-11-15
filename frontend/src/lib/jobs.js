@@ -14,6 +14,7 @@ import {
   NOTEBOOK_KINDS,
   SEEDVR_DATASET,
   ZIMAGE_LORAS,
+  ZIMAGE_MAIN_DATASET,
   base64ToBytes,
   bytesToBase64,
   kernelBaseSlug,
@@ -700,12 +701,15 @@ async function runJob(job) {
     // 主模型 + LoRA 数据集：Krea2 的 Ray 主模型走私有数据集（模板从 /kaggle/input
     // 里递归找 Ray 文件，找不到就直接报错，所以 Krea2 单必挂）；HerRAW 也走私有
     // 数据集（模板本身也从 HF 镜像下载同一文件，数据集挂上是双保险，只在带 LoRA
-    // 时挂）。Z-Image 的三个 LoRA 只能走数据集，模板里没有 HF 兜底。MOSS 的观澜
+    // 时挂）。Z-Image 的 PornMaster 主模型也走私有数据集（模板从 /kaggle/input
+    // 里递归找 PornMaster 文件，找不到就直接报错，所以 Z-Image 单必挂）；三个
+    // LoRA 只能走数据集，模板里没有 HF 兜底。MOSS 的观澜
     // 走 HF 镜像下载，没有 Kaggle 数据集，不挂。
     if (job.model === "krea2") {
       datasetSources = [...datasetSources, KREA2_RAY_DATASET];
       if (job.useLora !== false) datasetSources = [...datasetSources, KREA2_LORA.dataset];
     } else if (job.model === "zimage") {
+      datasetSources = [ZIMAGE_MAIN_DATASET, ...datasetSources];
       const keys = normalizeLoraKeys(job.loraKeys ?? DEFAULT_ZIMAGE_LORA_KEYS);
       for (const k of keys) {
         const lora = ZIMAGE_LORAS.find((l) => l.key === k);
