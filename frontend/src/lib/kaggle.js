@@ -558,14 +558,20 @@ export class KaggleClient {
     if (st.error.includes("401")) {
       return { exists: false, state: null, viaList: false, authError: st.error, inconclusive: false, detail: st.error };
     }
-    // 状态接口连不上（网络断开）：列表找到算存在，找不到也不算不存在——没拿到确定答复
+    // 状态接口连不上（网络断开）或查不存在的 kernel 回 403（Kaggle 对不存
+    // 在的 kernel 查状态回 403 而不是 404）：列表找到算存在；列表已成功读
+    // 回且里面确实没有这个 slug，等于确定性答复——确认不在云端，可以推。
     const listed = await this.kernelListed(ref);
     if (listed === true) {
       return { exists: true, state: null, viaList: true, authError: null, inconclusive: false, detail: "Token 归属账号的 Kernel 列表里已有这个 Kernel（kernels/status 还没跟上）" };
     }
-    const statusPart = `kernels/status 查不到（${st.error}）`;
-    const listPart = listed === false ? "Kernel 列表这次也没翻到它（仍无法确认）" : "Kernel 列表这次没读到（无法确认）";
-    return { exists: false, state: null, viaList: false, authError: null, inconclusive: true, detail: `${statusPart}；${listPart}` };
+    if (listed === false) {
+      return {
+        exists: false, state: null, viaList: false, authError: null, inconclusive: false,
+        detail: "Kernel 列表已读回，里面没有这个任务，确认不在云端，可以提交",
+      };
+    }
+    return { exists: false, state: null, viaList: false, authError: null, inconclusive: true, detail: `kernels/status 查不到（${st.error}）；Kernel 列表这次没读到（无法确认）` };
   }
 
   /**

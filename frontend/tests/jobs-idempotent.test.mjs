@@ -45,7 +45,7 @@ async function waitFor(cond, timeoutMs = 5000, what = "条件") {
 
 // 可编程的云端行为（每个测试按需改）
 const fake = {
-  status: "down", // "down"（断网）| "absent"（404）| "running" | "queued"
+  status: "down", // "down"（断网）| "absent"（404）| "running" | "queued" | "forbidden"（状态接口 403）
   list: [], // kernels/list 返回的 ref 列表
   push: "ok", // "ok" | "down"（push 请求发出去但回包丢了）
   pushCalls: [], // 记录每次真正发出的 push 的 slug
@@ -79,6 +79,10 @@ globalThis.fetch = async (url, opts) => {
     if (fake.status === "down") throw new TypeError("fetch failed");
     if (fake.status === "running") return jsonRes(200, { status: "RUNNING" });
     if (fake.status === "queued") return jsonRes(200, { status: "QUEUED" });
+    if (fake.status === "forbidden") {
+      // Kaggle 对不存在的 kernel 查状态回 403（不是 404）
+      return jsonRes(403, { error: { code: 403, message: "Permission 'kernels.get' was denied", status: "PERMISSION_DENIED" } });
+    }
     // 默认：只有推过才算存在（模拟 kernel 建出后状态接口才跟得上）
     if (fake.pushCalls.length > 0) return jsonRes(200, { status: "RUNNING" });
     return jsonRes(404, { error: "not found" });
@@ -260,6 +264,20 @@ test("retryJob：网络未恢复时不建新任务", async () => {
   assert.equal(getJobs().length, before);
   assert.equal(fake.pushCalls.length, 0);
   assert.equal(isNetworkDown(), true);
+});
+
+test("confirmKernelExists：状态接口 403 + 列表里没有 = 确认不存在，可以推", async () => {
+  const client = new KaggleClient({ username: "u", key: "t" });
+  fake.status = "forbidden";
+  fake.list = [];
+  const res = await client.confirmKernelExists("u/app-qwen-comfyui-kaggle-999");
+  assert.equal(res.exists, false);
+  assert.equal(res.inconclusive, false);
+  // 列表本身读不到时仍不可确认
+  fake.status = "down";
+  const down = await client.confirmKernelExists("u/app-qwen-comfyui-kaggle-999");
+  assert.equal(down.exists, false);
+  assert.equal(down.inconclusive, true);
 });
 
 test("confirmKernelExists：404=确认不存在，断网=不可确认", async () => {
