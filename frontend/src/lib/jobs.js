@@ -9,19 +9,15 @@ import { LiveActivities } from "@ciabosoftwaresolutions/capacitor-live-activitie
 import {
   DEFAULT_MOSS_LORA_KEYS,
   DEFAULT_ZIMAGE_LORA_KEYS,
-  KREA2_LORA,
-  KREA2_RAY_DATASET,
   MODEL_LABELS,
   NOTEBOOK_KINDS,
-  SEEDVR_DATASET,
-  ZIMAGE_LORAS,
-  ZIMAGE_MAIN_DATASET,
   base64ToBytes,
   bytesToBase64,
+  collectDatasetSources,
   kernelBaseSlug,
-  mossLoraDatasets,
   normalizeLoraKeys,
   normalizeMossLoraKeys,
+  normalizeUseUpscale,
   outputFileName,
   patchNotebook,
   randomSeed,
@@ -418,8 +414,9 @@ function requireCreds() {
 
 /** 提交一单：只建记录进本地队列，由 pumpQueue 按 2 并发启动。
  * useLora：Krea2 的 LoRA 开关（默认带）；loraKeys：MOSS 的 LoRA 选择（默认只带
- * 观澜，空数组 = 不挂）/ Z-Image 的 LoRA 选择（默认全带）。 */
-export async function submitJob({ model, prompt, ratioKey = "auto", useLora, loraKeys }) {
+ * 观澜，空数组 = 不挂）/ Z-Image 的 LoRA 选择（默认全带）。useUpscale：超分
+ * 开关（默认开，false = 底图直接当成品、不挂 SeedVR 数据集）。 */
+export async function submitJob({ model, prompt, ratioKey = "auto", useLora, loraKeys, useUpscale }) {
   requireCreds();
   const cleanPrompt = String(prompt || "").trim();
   if (!cleanPrompt) throw new Error("提示词不能为空。");
@@ -442,6 +439,9 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
         : model === "zimage"
           ? normalizeLoraKeys(loraKeys ?? DEFAULT_ZIMAGE_LORA_KEYS)
           : undefined,
+    // 超分开关随任务持久化（默认开；老任务没有该字段时按开处理，见 normalizeUseUpscale）。
+    // 重提/重新生成按原选择重放。
+    useUpscale: normalizeUseUpscale(useUpscale),
     width: size.width,
     height: size.height,
     seed: randomSeed(),
@@ -475,11 +475,11 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
   return job;
 }
 
-/** 失败任务重提：同参数（LoRA 选择也原样带上）、新种子、新任务号。 */
+/** 失败任务重提：同参数（LoRA 选择与超分开关也原样带上）、新种子、新任务号。 */
 export async function retryJob(id) {
   const old = jobs.find((j) => j.id === id);
   if (!old) throw new Error("找不到这条任务");
-  return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys });
+  return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale });
 }
 
 /** 重新生成：同提示词/模型/比例新开一个任务（新种子），旧图保留，两图互相关联，方便对比。 */
@@ -487,7 +487,7 @@ export async function regenerateJob(id) {
   const old = jobs.find((j) => j.id === id);
   if (!old) throw new Error("找不到这张图");
   if (old.status !== "done") throw new Error("这张图还没完成，不能重新生成");
-  const job = await submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys });
+  const job = await submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale });
   job.regeneratedFrom = old.id;
   old.regeneratedBy = job.id;
   await saveJobs();
@@ -690,9 +690,23 @@ async function runJob(job) {
       jobId: job.id,
       useLora: job.useLora,
       loraKeys: job.loraKeys,
+      useUpscale: job.useUpscale,
     });
 
-    let datasetSources = [];
+    // 主模型 + LoRA + 超分数据集（纯函数 collectDatasetSources 组装，老任务没有
+    // useUpscale 字段时按开处理、照常挂 SeedVR 数据集）：
+    // MOSS 的 Moody 模型数据集须先核实存在（找不到就直接报错取消推送）；Krea2
+    // 的 Ray 主模型走私有数据集（模板从 /kaggle/input 里递归找 Ray 文件，找不
+    // 到就直接报错，所以 Krea2 单必挂），HerRAW 也走私有数据集（模板本身也从
+    // HF 镜像下载同一文件，数据集挂上是双保险，只在带 LoRA 时挂）；Z-Image 的
+    // PornMaster 主模型也走私有数据集（模板从 /kaggle/input 里递归找
+    // PornMaster 文件，找不到就直接报错，所以 Z-Image 单必挂），三个 LoRA 只能
+    // 走数据集，模板里没有 HF 兜底；MOSS 的观澜走 HF 镜像下载，没有 Kaggle
+    // 数据集，不挂，Blender3D 只能走私有数据集，只在选中 Blender3D 时挂。
+    // SeedVR 7B 放大模型走私有数据集（四模板的下载格都会从 /kaggle/input 软
+    // 链它进 ComfyUI/models/SEEDVR2/，没挂就直接报错），只在开超分时挂；
+    // 被云端拒绝时下面统一取消推送并报数据集名。
+    let moodyRef = null;
     if (job.model === "moss") {
       updateJob(job.id, { stageDetail: "正在确认 Moody 模型数据集…" });
       await saveJobs();
@@ -705,38 +719,17 @@ async function runJob(job) {
         }
         throw new Error("暂时连不上云端，没法确认模型数据集，请稍后重试。");
       }
-      datasetSources = [resolved.ref];
+      moodyRef = resolved.ref;
       updateJob(job.id, { stageDetail: `模型数据集已确认（${resolved.ref}），正在推送…` });
       await saveJobs();
     }
-    // 主模型 + LoRA 数据集：Krea2 的 Ray 主模型走私有数据集（模板从 /kaggle/input
-    // 里递归找 Ray 文件，找不到就直接报错，所以 Krea2 单必挂）；HerRAW 也走私有
-    // 数据集（模板本身也从 HF 镜像下载同一文件，数据集挂上是双保险，只在带 LoRA
-    // 时挂）。Z-Image 的 PornMaster 主模型也走私有数据集（模板从 /kaggle/input
-    // 里递归找 PornMaster 文件，找不到就直接报错，所以 Z-Image 单必挂）；三个
-    // LoRA 只能走数据集，模板里没有 HF 兜底。MOSS 的观澜
-    // 走 HF 镜像下载，没有 Kaggle 数据集，不挂；Blender3D 只能走私有数据集，
-    // 只在选中 Blender3D 时挂。
-    if (job.model === "moss") {
-      datasetSources = [
-        ...datasetSources,
-        ...mossLoraDatasets(job.loraKeys ?? (job.useLora === false ? [] : DEFAULT_MOSS_LORA_KEYS)),
-      ];
-    } else if (job.model === "krea2") {
-      datasetSources = [...datasetSources, KREA2_RAY_DATASET];
-      if (job.useLora !== false) datasetSources = [...datasetSources, KREA2_LORA.dataset];
-    } else if (job.model === "zimage") {
-      datasetSources = [ZIMAGE_MAIN_DATASET, ...datasetSources];
-      const keys = normalizeLoraKeys(job.loraKeys ?? DEFAULT_ZIMAGE_LORA_KEYS);
-      for (const k of keys) {
-        const lora = ZIMAGE_LORAS.find((l) => l.key === k);
-        if (lora) datasetSources = [...datasetSources, lora.dataset];
-      }
-    }
-    // SeedVR 7B 放大模型走私有数据集（2026-11-15，四模板同步 SeedVR 第二段）：
-    // 四个模板的下载格都会从 /kaggle/input 软链它进 ComfyUI/models/SEEDVR2/，
-    // 没挂就直接报错，所以四模型都挂；被云端拒绝时下面统一取消推送并报数据集名。
-    datasetSources = [...datasetSources, SEEDVR_DATASET];
+    const datasetSources = collectDatasetSources({
+      model: job.model,
+      loraKeys: job.loraKeys,
+      useLora: job.useLora,
+      useUpscale: job.useUpscale,
+      moodyRef,
+    });
 
     const slug = `${kernelBaseSlug(job.model)}-${job.id}`;
     const push = await client.pushKernel({

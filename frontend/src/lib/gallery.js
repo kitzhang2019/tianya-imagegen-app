@@ -17,7 +17,7 @@
 //   桌面调试的限制，真机（原生 HTTP，不走 CORS）不受影响。
 
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
-import { bytesToBase64, loraLabelForJob } from "./notebook.js";
+import { bytesToBase64, loraLabelForJob, outputSizeForJob, upscalerLabelForJob } from "./notebook.js";
 
 export const DEFAULT_GALLERY_URL =
   "https://tianya-gallery-bizen7j8-workspace-krgsbt.cloady.io/upload.php";
@@ -38,14 +38,18 @@ export async function pushToGallery({ url, key, job, pngBytes, fileName }) {
   if (!pngBytes || pngBytes.length === 0) return { ok: false, error: "没有图片数据" };
   const endpoint = (url || "").trim() || DEFAULT_GALLERY_URL;
   const modelLabel = GALLERY_MODEL_LABELS[job.model] ?? "MOSS-Image";
+  // 宽高写实际出图尺寸：开超分 = 任务尺寸，关超分 = 底图尺寸（最终尺寸的一半）。
+  const size = outputSizeForJob(job);
   const fields = {
     key,
     prompt: job.prompt,
     model: modelLabel,
     seed: job.seed != null ? String(job.seed) : "",
-    width: String(job.width),
-    height: String(job.height),
+    width: String(size.width),
+    height: String(size.height),
     created_at: new Date(job.createdAt).toISOString(),
+    // 超分（2026-11-15）：开「SeedVR 7B」，关「无」；老任务没有 useUpscale 字段时按开处理。
+    upscaler: upscalerLabelForJob(job),
   };
   // LoRA 标签（与管理站推送格式一致）：挂了就写组合标签，没挂发空，画廊详情页才显示得对。
   if (job.model === "moss" || job.model === "krea2" || job.model === "zimage") {

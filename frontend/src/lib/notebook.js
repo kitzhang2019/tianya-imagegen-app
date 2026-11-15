@@ -186,6 +186,54 @@ export const ZIMAGE_MAIN_DATASET = "kitzhang2019/pornmaster-zimage-v35-fp8";
 // SeedVR 7B 放大模型（2026-11-15，四模板同步 SeedVR 第二段）：DiT + VAE 走私有
 // 数据集，模板下载格从 /kaggle/input 软链进 ComfyUI/models/SEEDVR2/。四模型都挂。
 export const SEEDVR_DATASET = "kitzhang2019/seedvr2-7b";
+
+// --- 超分开关（2026-11-15，用户定：默认开）---
+// 开：底图 1024×1536 + SeedVR 7B → 最终尺寸；关：跳过 SeedVR 段，底图直接当
+// 成品出 WebP，不挂 seedvr2-7b 数据集。老任务没有 useUpscale 字段时按开处理。
+export function normalizeUseUpscale(value) {
+  return value !== false;
+}
+
+const round16 = (v) => Math.max(16, Math.round(v / 16) * 16);
+
+/** 关超分时的实际出图尺寸：底图尺寸 = 最终尺寸的一半，向下取整到 16 的倍数（与 patchNotebook 里底图算法一致）。 */
+export function upscaleOffSize(width, height) {
+  return { width: round16(width / 2), height: round16(height / 2) };
+}
+
+/** 一条任务的实际出图尺寸：开 = 任务尺寸，关 = 底图尺寸。 */
+export function outputSizeForJob(job) {
+  if (!job) return { width: 0, height: 0 };
+  if (normalizeUseUpscale(job.useUpscale)) return { width: job.width, height: job.height };
+  return upscaleOffSize(job.width, job.height);
+}
+
+/** 一条任务的超分标签（画廊 upscaler 字段）：开「SeedVR 7B」，关「无」。 */
+export function upscalerLabelForJob(job) {
+  return normalizeUseUpscale(job?.useUpscale) ? "SeedVR 7B" : "无";
+}
+
+/** 一条任务要挂的 Kaggle 数据集（纯函数，供 runJob 与单测共用）：主模型 +
+ * LoRA 数据集按原逻辑，SeedVR 数据集只在开超分时挂。moodyRef 是 MOSS 已核实
+ * 的 Moody 数据集引用（runJob 里先 resolve 出来再传；传 null 时不挂）。 */
+export function collectDatasetSources({ model, loraKeys, useLora, useUpscale, moodyRef }) {
+  const sources = [];
+  if (model === "moss") {
+    if (moodyRef) sources.push(moodyRef);
+    sources.push(...mossLoraDatasets(loraKeys ?? (useLora === false ? [] : DEFAULT_MOSS_LORA_KEYS)));
+  } else if (model === "krea2") {
+    sources.push(KREA2_RAY_DATASET);
+    if (useLora !== false) sources.push(KREA2_LORA.dataset);
+  } else if (model === "zimage") {
+    sources.push(ZIMAGE_MAIN_DATASET);
+    for (const k of normalizeLoraKeys(loraKeys ?? DEFAULT_ZIMAGE_LORA_KEYS)) {
+      const lora = ZIMAGE_LORAS.find((l) => l.key === k);
+      if (lora) sources.push(lora.dataset);
+    }
+  }
+  if (normalizeUseUpscale(useUpscale)) sources.push(SEEDVR_DATASET);
+  return sources;
+}
 export const ZIMAGE_LORAS = [
   { key: "herraw", file: "HerRAW_zimage_v0.2_c1-st5000.safetensors", strength: 0.8, dataset: "kitzhang2019/herraw-zimage-v02", label: "HerRAW 0.8" },
   { key: "yaoguang", file: "Kook_Zimage_Yaoguang.safetensors", strength: 1.0, dataset: "kitzhang2019/kook-zimage-yaoguang2", label: "瑶光 1.0" },
@@ -324,20 +372,57 @@ function replaceOnce(text, oldStr, newStr, label) {
   return text.replace(oldStr, newStr);
 }
 
+// 关超分时切掉一段模板代码：从 startMarker 起、到 endMarker 之前为止，
+// 两端标记都必须恰好出现 1 次，否则抛错（模板结构变了就绝不静默硬切）。
+function exciseOnce(text, startMarker, endMarker, label) {
+  const a = text.indexOf(startMarker);
+  if (a === -1) throw new Error(`关超分：模板里找不到 SeedVR 段起点 ${label}（${startMarker}）`);
+  if (text.indexOf(startMarker, a + 1) !== -1) {
+    throw new Error(`关超分：SeedVR 段起点 ${label} 应恰好出现 1 次`);
+  }
+  const b = text.indexOf(endMarker, a);
+  if (b === -1 || b <= a) throw new Error(`关超分：模板里找不到 SeedVR 段终点 ${label}（${endMarker}）`);
+  if (text.indexOf(endMarker, b + 1) !== -1) {
+    throw new Error(`关超分：SeedVR 段终点 ${label} 应恰好出现 1 次`);
+  }
+  return text.slice(0, a) + text.slice(b);
+}
+
+// 关超分时切掉一段模板代码（含尾行本身）：从 startMarker 起、到 endMarker
+// 所在行尾为止，两端标记都必须恰好出现 1 次，否则抛错。
+function exciseThroughLine(text, startMarker, endMarker, label) {
+  const a = text.indexOf(startMarker);
+  if (a === -1) throw new Error(`关超分：模板里找不到 SeedVR 段起点 ${label}（${startMarker}）`);
+  if (text.indexOf(startMarker, a + 1) !== -1) {
+    throw new Error(`关超分：SeedVR 段起点 ${label} 应恰好出现 1 次`);
+  }
+  const b = text.indexOf(endMarker, a);
+  if (b === -1 || b <= a) throw new Error(`关超分：模板里找不到 SeedVR 段终点 ${label}（${endMarker}）`);
+  if (text.indexOf(endMarker, b + 1) !== -1) {
+    throw new Error(`关超分：SeedVR 段终点 ${label} 应恰好出现 1 次`);
+  }
+  const lineEnd = text.indexOf("\n", b);
+  return text.slice(0, a) + (lineEnd === -1 ? "" : text.slice(lineEnd + 1));
+}
+
 /**
  * 给 notebook 模板打补丁。
  * @param {string|object} template - notebook JSON 文本或已解析对象
- * @param {{model:string, prompt:string, width:number, height:number, seed:number, jobId:number, useLora?:boolean, loraKeys?:string[]}} opts
+ * @param {{model:string, prompt:string, width:number, height:number, seed:number, jobId:number, useLora?:boolean, loraKeys?:string[], useUpscale?:boolean}} opts
  *   useLora：Krea2 的 LoRA 开关（默认带，false 时清空 LORA_NAME）；MOSS 旧任务
  *   的开关（新任务走 loraKeys，未传时 useLora=false = 不挂，否则默认只带观澜）；
  *   loraKeys：MOSS / Z-Image 的 LoRA 选择（MOSS 默认只带观澜，空数组 = 不挂；
  *   Z-Image 默认全带，空数组 = 不挂）。MOSS 选中 Blender3D 时提示词没有
  *   @blender 会自动在末尾追加整串触发词，已有则不加。
+ *   useUpscale：超分开关（默认开）。开 = 现状（底图 + SeedVR 7B → 最终尺寸）；
+ *   关 = 切掉出图格与下载格里的 SeedVR 段，phase 1 的底图直接当成品（SaveImage
+ *   与 GEN 落盘路径都改成任务前缀，WebP 仍按精细模式从底图出），不挂
+ *   seedvr2-7b 数据集。模板不是 SeedVR 接线版时照样抛错（守卫在先）。
  * @returns {{text:string, notebook:object}} text 为可直接推送的 notebook JSON 字符串
  * （cell source 已按 Kaggle 官方客户端的方式归一化为单个字符串，code cell 输出已清空）。
  * 失败时抛错，绝不返回半成品。
  */
-export function patchNotebook(template, { model, prompt, width, height, seed, jobId, useLora, loraKeys }) {
+export function patchNotebook(template, { model, prompt, width, height, seed, jobId, useLora, loraKeys, useUpscale }) {
   const cfg = NOTEBOOK_KINDS[model];
   if (!cfg) throw new Error(`未知的模型：${model}`);
   if (!prompt || !String(prompt).trim()) throw new Error("提示词不能为空");
@@ -352,6 +437,7 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
   if (!Array.isArray(cells) || cells.length < 6) {
     throw new Error(`模板 ${cfg.file} 结构不对（格子数不足）`);
   }
+  const upscaleOn = normalizeUseUpscale(useUpscale);
   let run = cellText(cells[4]);
   let disp = cellText(cells[5]);
   let dl = cellText(cells[3]);
@@ -462,7 +548,6 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
   // 16 的倍数（latent 是像素 /8，DiT patch 2 要求 latent 边长为偶数，即像素
   // 边长能被 16 整除）；SeedVR resolution = 底图短边 × 2（与磁盘模板
   // 1024×1536 配 resolution 2048 的做法一致，短边 1024 → 2048）。
-  const round16 = (v) => Math.max(16, Math.round(v / 16) * 16);
   const baseW = round16(width / 2);
   const baseH = round16(height / 2);
   const seedvrResolution = 2 * Math.min(baseW, baseH);
@@ -478,6 +563,19 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
     throw new Error(`模板 ${cfg.file} 不是 SeedVR 版（缺 SeedVR 第二段或下载格缺 SeedVR 模型软链）`);
   }
 
+  // 关超分：切掉 SeedVR 段（守卫已确认模板是 SeedVR 接线版，才敢切）。
+  // 出图格切两段：SeedVR helpers + Phase 2 节点定义（到 submit_and_wait 定义
+  // 之前为止），以及底图拷贝 + SeedVR 预检 + Phase 2 提交（到 Phase 3 之前
+  // 为止）；下载格切掉 SeedVR 模型软链段（数据集没挂时那段会直接 SystemExit）。
+  // 留下的 need 列表里 SeedVR 节点名只是“节点类型在不在”的预检，插件在
+  // cell 2 照常安装，类型都在，不影响。
+  if (!upscaleOn) {
+    run = exciseOnce(run, "# ---------- SeedVR helpers", "def submit_and_wait(", "出图格 SeedVR helpers + Phase 2 节点");
+    run = exciseOnce(run, "# LoadImage reads", "# Phase 3:", "出图格底图拷贝 + SeedVR 预检 + Phase 2 提交");
+    dl = exciseThroughLine(dl, "# SeedVR2 7B (2026-11-15)", 'print("seedvr models ready")', "下载格 SeedVR 模型软链");
+    dlChanged = true;
+  }
+
   if (model === "moss") {
     run = replaceOnce(
       run,
@@ -486,20 +584,24 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
       "MOSS latent 尺寸（SeedVR 底图）",
     );
     // 种子：KSampler 与 SeedVR 放大节点各有一个 "seed": 42（管理站的做法也是
-    // 任务种子同步写进 SeedVR 节点），两个都换成任务种子。
+    // 任务种子同步写进 SeedVR 节点），开超分时两个都换成任务种子；关超分时
+    // SeedVR 节点已被切掉，只剩 KSampler 的 1 个。
     {
+      const expectedSeeds = upscaleOn ? 2 : 1;
       const seedHits = run.split('"seed": 42').length - 1;
-      if (seedHits !== 2) {
-        throw new Error(`MOSS 种子应恰好出现 2 次（KSampler + SeedVR），实际 ${seedHits} 次`);
+      if (seedHits !== expectedSeeds) {
+        throw new Error(`MOSS 种子应恰好出现 ${expectedSeeds} 次（KSampler${upscaleOn ? " + SeedVR" : ""}），实际 ${seedHits} 次`);
       }
       run = run.split('"seed": 42').join(`"seed": ${seed}`);
     }
-    run = replaceOnce(
-      run,
-      '"resolution": 2048, "max_resolution": 6000',
-      `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
-      "MOSS SeedVR resolution",
-    );
+    if (upscaleOn) {
+      run = replaceOnce(
+        run,
+        '"resolution": 2048, "max_resolution": 6000',
+        `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
+        "MOSS SeedVR resolution",
+      );
+    }
   } else if (model === "qwen") {
     run = replaceOnce(
       run,
@@ -509,13 +611,15 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
     );
     run = replaceOnce(run, '"resolution": 1024', `"resolution": ${baseH}`, "Qwen resolution（跟底图高度走，与磁盘模板一致）");
     run = replaceOnce(run, '"noise_seed": 42', `"noise_seed": ${seed}`, "Qwen 种子");
-    run = replaceOnce(run, '"seed": 42', `"seed": ${seed}`, "Qwen SeedVR 种子");
-    run = replaceOnce(
-      run,
-      '"resolution": 2048, "max_resolution": 6000',
-      `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
-      "Qwen SeedVR resolution",
-    );
+    if (upscaleOn) {
+      run = replaceOnce(run, '"seed": 42', `"seed": ${seed}`, "Qwen SeedVR 种子");
+      run = replaceOnce(
+        run,
+        '"resolution": 2048, "max_resolution": 6000',
+        `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
+        "Qwen SeedVR resolution",
+      );
+    }
   } else if (model === "krea2") {
     run = replaceOnce(
       run,
@@ -524,38 +628,70 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
       "Krea2 latent 尺寸（SeedVR 底图）",
     );
     run = replaceOnce(run, '"noise_seed": 42', `"noise_seed": ${seed}`, "Krea2 种子");
-    run = replaceOnce(run, '"seed": 42', `"seed": ${seed}`, "Krea2 SeedVR 种子");
-    run = replaceOnce(
-      run,
-      '"resolution": 2048, "max_resolution": 6000',
-      `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
-      "Krea2 SeedVR resolution",
-    );
+    if (upscaleOn) {
+      run = replaceOnce(run, '"seed": 42', `"seed": ${seed}`, "Krea2 SeedVR 种子");
+      run = replaceOnce(
+        run,
+        '"resolution": 2048, "max_resolution": 6000',
+        `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
+        "Krea2 SeedVR resolution",
+      );
+    }
   } else if (model === "zimage") {
     run = replaceOnce(run, "WIDTH = 1024", `WIDTH = ${baseW}`, "Z-Image 宽度（SeedVR 底图）");
     run = replaceOnce(run, "HEIGHT = 1024", `HEIGHT = ${baseH}`, "Z-Image 高度（SeedVR 底图）");
-    // 种子：KSampler 与 SeedVR 放大节点各有一个 "seed": 42，两个都换成任务种子。
+    // 种子：KSampler 与 SeedVR 放大节点各有一个 "seed": 42，开超分时两个都换
+    // 成任务种子；关超分时 SeedVR 节点已被切掉，只剩 KSampler 的 1 个。
     {
+      const expectedSeeds = upscaleOn ? 2 : 1;
       const seedHits = run.split('"seed": 42').length - 1;
-      if (seedHits !== 2) {
-        throw new Error(`Z-Image 种子应恰好出现 2 次（KSampler + SeedVR），实际 ${seedHits} 次`);
+      if (seedHits !== expectedSeeds) {
+        throw new Error(`Z-Image 种子应恰好出现 ${expectedSeeds} 次（KSampler${upscaleOn ? " + SeedVR" : ""}），实际 ${seedHits} 次`);
       }
       run = run.split('"seed": 42').join(`"seed": ${seed}`);
     }
-    run = replaceOnce(
-      run,
-      '"resolution": 2048, "max_resolution": 6000',
-      `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
-      "Z-Image SeedVR resolution",
-    );
+    if (upscaleOn) {
+      run = replaceOnce(
+        run,
+        '"resolution": 2048, "max_resolution": 6000',
+        `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
+        "Z-Image SeedVR resolution",
+      );
+    }
   }
 
-  run = replaceOnce(
-    run,
-    `"filename_prefix": "${cfg.base}"`,
-    `"filename_prefix": "${cfg.prefix}_${jobId}"`,
-    "filename_prefix",
-  );
+  if (upscaleOn) {
+    run = replaceOnce(
+      run,
+      `"filename_prefix": "${cfg.base}"`,
+      `"filename_prefix": "${cfg.prefix}_${jobId}"`,
+      "filename_prefix",
+    );
+  } else {
+    // 关超分：底图直接当成品，phase 1 的 SaveImage 就用任务前缀，GEN 提交的
+    // 落盘路径也改成任务前缀；webp_fine 与展示格仍走下面统一的 base→任务前缀
+    // 替换（webp_fine 的入参于是变成任务前缀的底图 PNG）。
+    const lowresPrefix = `${model}_lowres`;
+    run = replaceOnce(
+      run,
+      `"filename_prefix": "${lowresPrefix}"`,
+      `"filename_prefix": "${cfg.prefix}_${jobId}"`,
+      "低分 SaveImage 前缀（关超分）",
+    );
+    run = replaceOnce(
+      run,
+      `/kaggle/working/${lowresPrefix}.png`,
+      `/kaggle/working/${cfg.prefix}_${jobId}.png`,
+      "GEN 输出路径（关超分）",
+    );
+    // RESULT 打印里的 sv_s 在关超分时不存在（Phase 2 已切掉），改成 0。
+    run = replaceOnce(
+      run,
+      'print("RESULT gen_s=%d seedvr_s=%d webp_bytes=%d webp_q=%d" % (gen_s, sv_s, webp_s, webp_q))',
+      'print("RESULT gen_s=%d seedvr_s=0 webp_bytes=%d webp_q=%d" % (gen_s, webp_s, webp_q))',
+      "RESULT 打印（关超分，sv_s 不存在）",
+    );
+  }
 
   const oldPath = `/kaggle/working/${cfg.base}.png`;
   const newPath = `/kaggle/working/${cfg.prefix}_${jobId}.png`;

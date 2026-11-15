@@ -89,6 +89,7 @@ app.innerHTML = `
         </div>
       </div>
       <div id="lora-box" class="lora-box"></div>
+      <div id="upscale-box" class="lora-box"></div>
       <button id="btn-submit" class="primary-btn">开始生成</button>
       <p id="form-error" class="error" hidden></p>
     </div>
@@ -252,6 +253,20 @@ const loraState = {
   krea2: true,
   zimage: [...DEFAULT_ZIMAGE_LORA_KEYS],
 };
+
+// 超分开关（2026-11-15，用户定：默认开）：开 = 底图 + SeedVR 7B → 最终尺寸；
+// 关 = 底图直接当成品，不挂 SeedVR 数据集。四个模型共用一个开关（不按模型记）。
+let useUpscale = true;
+
+/** 渲染超分开关：单个开关钮，默认点亮，样式与 LoRA 开关钮一致（.lora-row）。 */
+function renderUpscaleBox() {
+  const box = $("upscale-box");
+  if (!box) return;
+  box.innerHTML = `<label class="lora-row"><input type="checkbox" data-upscale ${useUpscale ? "checked" : ""} /> 超分 SeedVR 7B</label>`;
+  box.querySelector("input[data-upscale]").addEventListener("change", (e) => {
+    useUpscale = e.target.checked;
+  });
+}
 
 /** 按当前模型渲染 LoRA 选择区：MOSS 两个复选，Krea2 一个开关，Z-Image 三个复选，Qwen 不显示。 */
 function renderLoraBox() {
@@ -825,6 +840,7 @@ submitBtn.addEventListener("click", async () => {
       ratioKey: selectedRatio,
       useLora: selectedModel === "krea2" ? loraState.krea2 : undefined,
       loraKeys: selectedModel === "zimage" ? [...loraState.zimage] : selectedModel === "moss" ? [...loraState.moss] : undefined,
+      useUpscale,
     });
     promptEl.value = "";
     $("prompt-count").textContent = `0 / ${MAX_PROMPT}`;
@@ -1077,6 +1093,7 @@ onJobsChange(renderAll);
 
 populateSelects();
 renderLoraBox();
+renderUpscaleBox();
 renderAll();
 
 // 生成完成/失败的系统通知：首次打开时请求一次通知权限（用户拒绝也不影响生图本身）
