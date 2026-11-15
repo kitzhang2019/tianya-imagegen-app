@@ -176,6 +176,11 @@ app.innerHTML = `
       <p id="settings-saved" class="ok" hidden>已保存。</p>
       <button id="btn-lock-settings" class="secondary-btn">锁定设置</button>
     </div>
+    <!-- 关于：不锁，打开设置页直接就能看见 -->
+    <div id="settings-about" class="card glass settings-about">
+      <div class="about-row"><span class="about-label">版本</span><span id="app-version">–</span></div>
+      <div class="about-row"><span class="about-label">GitHub</span><a id="github-link" class="external-link" href="https://github.com/kitzhang2019/tianya-imagegen-app" target="_blank" rel="noopener">https://github.com/kitzhang2019/tianya-imagegen-app</a></div>
+    </div>
   </section>
 </main>
 
@@ -1097,6 +1102,13 @@ document.addEventListener("keydown", (e) => {
 });
 
 onJobsChange(renderAll);
+
+// 设置页“关于”里的版本号：构建时由 vite 从 package.json 注入
+// （__APP_VERSION__，见 vite.config.js），不用手写，发版自动跟着变。
+const appVersionEl = document.getElementById("app-version");
+if (appVersionEl && typeof __APP_VERSION__ !== "undefined") {
+  appVersionEl.textContent = __APP_VERSION__;
+}
 
 populateSelects();
 renderLoraBox();

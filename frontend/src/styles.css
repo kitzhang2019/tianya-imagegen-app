@@ -925,6 +925,30 @@ textarea {
   margin-top: 18px;
 }
 
+/* ---------- 设置页“关于”（版本 + GitHub）：不锁，打开设置页直接可见 ---------- */
+.settings-about {
+  margin-top: 12px;
+}
+
+.settings-about .about-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 14px;
+}
+
+.settings-about .about-label {
+  flex: none;
+  color: var(--muted);
+}
+
+.settings-about .external-link {
+  color: var(--accent1);
+  text-decoration: none;
+  word-break: break-all;
+}
+
 /* ---------- 底部毛玻璃标签栏 ---------- */
 .tabbar {
   position: fixed;
