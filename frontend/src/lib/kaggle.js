@@ -339,6 +339,28 @@ export class KaggleClient {
   }
 
   /**
+   * 输出列表里有没有任何文件（true/false/null=问不到）。
+   * 排队超时自动核查用：状态接口不认识/查不到时，只看第一页有没有输出，
+   * 有 = 已在生成且已有输出，没 = 仍在排队暂无输出。不翻页、不找指定文件。
+   */
+  async hasAnyOutputFile(ref) {
+    const parts = splitKaggleRef(ref);
+    if (!parts) return null;
+    let res;
+    try {
+      res = await this._fetchJson(
+        `${KAGGLE_API_BASE}/kernels.KernelsApiService/ListKernelSessionOutput`,
+        { method: "POST", timeoutMs: 30000, body: parts },
+      );
+    } catch {
+      return null;
+    }
+    if (res.status < 200 || res.status >= 300) return null;
+    const files = res.data?.files ?? [];
+    return files.length > 0;
+  }
+
+  /**
    * 从签名 URL 下载结果 PNG（不带 Authorization）。
    * 校验 PNG 魔数与 8MB 上限；网络/HTTP 失败重试 3 次（2s / 4s 退避），
    * 每次 120s 超时。内容不对（不是 PNG / 超大）不重试，直接报错。

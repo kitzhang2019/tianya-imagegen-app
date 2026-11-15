@@ -49,6 +49,8 @@ const VERIFY_INTERVAL_MS = 30000;
 const QUEUED_BACKSTOP_MS = 6 * 3600 * 1000; // queued 超过 6 小时 -> 失败
 const DOWNLOAD_BACKSTOP_MS = 10 * 60 * 1000; // downloading 重试超过 10 分钟 -> 失败
 const RECONCILE_AFTER_MS = 20 * 60 * 1000; // queued/running 超过 20 分钟就探输出列表
+const QUEUE_ALLOWANCE_MS = 5 * 60 * 1000; // 预估总时长里的排队留量（与 Live Activities 预计完成时间同一口径）
+export const QUEUE_CHECK_INTERVAL_MS = 10 * 60 * 1000; // 排队超时后自动核查的刷新间隔：约 10 分钟再查一次
 const PROBE_BUDGET_MS = 50000;
 const FIND_BUDGET_MS = 150000;
 
@@ -329,7 +331,7 @@ const LIVE_SYNC_MIN_MS = 15000; // 同步间隔下限 15 秒（阶段变化时�
 
 function liveStateFor(job) {
   const { pct, label } = getJobProgress(job);
-  const estTotalMs = estimateGenerateMs(job.model, job.width, job.height) + 5 * 60 * 1000;
+  const estTotalMs = estimateTotalMs(job);
   return {
     title: MODEL_LABELS[job.model] ?? job.model,
     subtitle: `${label || "处理中"} · ${pct}%`,
@@ -575,6 +577,79 @@ function estimateGenerateMs(model, width, height) {
   const base = GEN_BASE_MS[model] || GEN_BASE_MS.moss;
   const px = Math.max(1, (width || 1) * (height || 1));
   return Math.max(30 * 1000, base.ms * (px / base.px));
+}
+
+/** 预估总时长（毫秒）：生成估算 + 5 分钟排队留量。与 Live Activities 的
+ * 预计完成时间（timerEnd = createdAt + 预估总时长）同一口径；“已超时”就
+ * 是现在超过了这个预计完成时间。预估算法本身不动，这里只复用它。 */
+export function estimateTotalMs(job) {
+  return estimateGenerateMs(job.model, job.width, job.height) + QUEUE_ALLOWANCE_MS;
+}
+
+/** 是不是“排队已超时”：处在排队阶段，且从提交起已超过预估总时长。
+ * 注意是超过预估，不是触到 6 小时排队硬上限。 */
+export function isQueueOverdue(job, now = Date.now()) {
+  if (!job || job.stage !== "queued") return false;
+  const since = job.createdAt || now;
+  return now - since > estimateTotalMs(job);
+}
+
+/** 核查结论 -> 括号备注文案（北京时间 HH:MM）。结论只有四种：
+ * queued=仍在排队，running=已在生成，has-output=已有输出文件，
+ * queued-no-output=仍在排队，暂无输出文件。 */
+export function formatQueueCheckNote(conclusion, atMs) {
+  const time = new Date(atMs).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Shanghai",
+  });
+  const text = {
+    queued: "仍在排队",
+    running: "已在生成",
+    "has-output": "已有输出文件",
+    "queued-no-output": "仍在排队，暂无输出文件",
+  }[conclusion];
+  return `（${time} 自动核查：${text ?? "仍在排队"}）`;
+}
+
+/** 排队超时自动核查：先查 kernel 状态，状态接口认出的直接定论；
+ * 不认识/查不到时改查输出文件列表，有文件 = 已有输出文件，没文件 =
+ * 仍在排队暂无输出文件。问不到（网络断开等）返回 null，调用方不记
+ * 时间、不写备注，下轮再试。knownState 是 tick 本轮刚查到的状态，
+ * 传进来就不用再查一次；传 "unknown"/空时这里自己查。 */
+export async function performQueueCheck(job, client, knownState) {
+  let state = knownState;
+  if (!state || state === "unknown") {
+    const st = await client.kernelStatus(job.kaggleRef);
+    if (!st.error && st.state !== "unknown") state = st.state;
+    else state = "unknown";
+  }
+  if (state === "queued") return "queued";
+  if (state === "running") return "running";
+  if (state === "complete") return "has-output"; // 已跑完必有输出；主流程下一轮会取图
+  if (state === "error") return null; // 云端已失败由主流程判失败，不写核查备注
+  const has = await client.hasAnyOutputFile(job.kaggleRef);
+  if (has === true) return "has-output";
+  if (has === false) return "queued-no-output";
+  return null;
+}
+
+/** 该核查就核查一次：只在排队阶段、已超时、距上次核查 ≥ 约 10 分钟时
+ * 跑；核查完把时间（queueCheckAt）和备注（queueCheckNote）存进任务
+ * （随任务持久化，不只放内存），返回备注文案；不该查或问不到返回 null。
+ * 离开排队阶段后不再调用，旧备注留在任务记录里不再更新。 */
+export async function maybeQueueOverdueCheck(job, client, knownState) {
+  if (!job || job.stage !== "queued" || job.status !== "queued") return null;
+  const now = Date.now();
+  if (!isQueueOverdue(job, now)) return null;
+  if (job.queueCheckAt && now - job.queueCheckAt < QUEUE_CHECK_INTERVAL_MS) return null;
+  const conclusion = await performQueueCheck(job, client, knownState);
+  if (!conclusion) return null;
+  const note = formatQueueCheckNote(conclusion, now);
+  updateJob(job.id, { queueCheckAt: now, queueCheckNote: note });
+  await saveJobs();
+  return note;
 }
 
 /** 任务进度：返回 { pct 0-100, label 阶段名 }。生成中按已耗时/估算推进，30%→88%。 */
@@ -936,7 +1011,9 @@ async function probeOutput(job, client, budgetMs = PROBE_BUDGET_MS) {
   await saveJobs();
   if (found.ok && found.url) return found.url;
   if (found.error) {
-    updateJob(job.id, { stageDetail: found.error.slice(0, 200) });
+    // 排队中的任务：探输出的报错别把自动核查的备注盖掉
+    const note = job.stage === "queued" && job.queueCheckNote ? ` ${job.queueCheckNote}` : "";
+    updateJob(job.id, { stageDetail: `${found.error.slice(0, 200)}${note}` });
     await saveJobs();
   }
   return null;
@@ -1125,13 +1202,22 @@ async function tick() {
       if (st.state === "queued" || st.state === "running") {
         const nextStatus = st.state;
         const stageAge = now - (job.pushedAt || job.createdAt);
+        const baseDetail =
+          nextStatus === "running"
+            ? "云端正在生成"
+            : `云端排队中（已等约 ${Math.max(1, Math.round(stageAge / 60000))} 分钟）`;
+        let detail = baseDetail;
+        if (nextStatus === "queued") {
+          // 排队已超时：自动核查一次真实状态，备注写进进度里（只保留最新一条）；
+          // 没到核查时间时，把上次的备注继续带上，别让它闪一下就没了
+          const note = await maybeQueueOverdueCheck(job, client, st.state);
+          const stored = note || job.queueCheckNote;
+          if (stored) detail = `${baseDetail} ${stored}`;
+        }
         updateJob(job.id, {
           status: nextStatus,
           stage: nextStatus,
-          stageDetail:
-            nextStatus === "running"
-              ? "云端正在生成"
-              : `云端排队中（已等约 ${Math.max(1, Math.round(stageAge / 60000))} 分钟）`,
+          stageDetail: detail,
         });
         await saveJobs();
         // 排队/运行超过 20 分钟：状态接口可能不报完成，探输出列表兜底
@@ -1141,11 +1227,18 @@ async function tick() {
         }
         continue;
       }
-      // unknown 或状态接口报错：写明原因，并探输出列表（#43 的教训）
+      // unknown 或状态接口报错：排队已超时先自动核查一次（只在排队阶段），
+      // 再写明原因，并探输出列表（#43 的教训）
+      let checkNote = null;
+      if (job.stage === "queued") {
+        checkNote = await maybeQueueOverdueCheck(job, client, "unknown");
+      }
+      const unknownText = st.error
+        ? `状态接口暂时查不到：${String(st.error).slice(0, 120)}，正在翻输出列表找结果图`
+        : `云端返回了不认识的状态${st.raw ? `「${st.raw}」` : ""}，正在翻输出列表找结果图`;
+      const storedNote = checkNote || job.queueCheckNote;
       updateJob(job.id, {
-        stageDetail: st.error
-          ? `状态接口暂时查不到：${String(st.error).slice(0, 120)}，正在翻输出列表找结果图`
-          : `云端返回了不认识的状态${st.raw ? `「${st.raw}」` : ""}，正在翻输出列表找结果图`,
+        stageDetail: storedNote ? `${unknownText} ${storedNote}` : unknownText,
       });
       await saveJobs();
       const url = await probeOutput(job, client);
