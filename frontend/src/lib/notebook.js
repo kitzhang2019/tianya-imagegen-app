@@ -165,6 +165,9 @@ export const KREA2_LORA = {
 // Krea2 主模型：Ray Artshoot v5 nvfp4（2026-11-15，App 与管理站/磁盘模板同步，
 // 旧 GGUF Q5_K_M 已弃用）。模板从该私有数据集里取模型文件，Krea2 单必挂。
 export const KREA2_RAY_DATASET = "kitzhang2019/ray-artshoot-krea2-v5-nvfp4";
+// SeedVR 7B 放大模型（2026-11-15，四模板同步 SeedVR 第二段）：DiT + VAE 走私有
+// 数据集，模板下载格从 /kaggle/input 软链进 ComfyUI/models/SEEDVR2/。四模型都挂。
+export const SEEDVR_DATASET = "kitzhang2019/seedvr2-7b";
 export const ZIMAGE_LORAS = [
   { key: "herraw", file: "HerRAW_zimage_v0.2_c1-st5000.safetensors", strength: 0.8, dataset: "kitzhang2019/herraw-zimage-v02", label: "HerRAW 0.8" },
   { key: "yaoguang", file: "Kook_Zimage_Yaoguang.safetensors", strength: 1.0, dataset: "kitzhang2019/kook-zimage-yaoguang2", label: "瑶光 1.0" },
@@ -388,35 +391,97 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
     throw new Error(`PROMPT 赋值应恰好替换 1 次，实际 ${promptHits} 次`);
   }
 
+  // SeedVR 两段式（2026-11-15，四模板已同步）：出图格先在底图尺寸上生成，
+  // 再由 SeedVR2 7B 放大 2 倍到最终尺寸。底图 = 最终尺寸的一半，向下取整到
+  // 16 的倍数（latent 是像素 /8，DiT patch 2 要求 latent 边长为偶数，即像素
+  // 边长能被 16 整除）；SeedVR resolution = 底图短边 × 2（与磁盘模板
+  // 1024×1536 配 resolution 2048 的做法一致，短边 1024 → 2048）。
+  const round16 = (v) => Math.max(16, Math.round(v / 16) * 16);
+  const baseW = round16(width / 2);
+  const baseH = round16(height / 2);
+  const seedvrResolution = 2 * Math.min(baseW, baseH);
+
+  // SeedVR 模板守卫：四模板都已是两段式，缺 SeedVR 就抛错，绝不推送一个
+  // 单段模板当两段跑。
+  if (
+    !run.includes("SeedVR2VideoUpscaler") ||
+    !run.includes("nodes_seedvr") ||
+    !run.includes("webp_fine") ||
+    !dl.includes("seedvr2-7b")
+  ) {
+    throw new Error(`模板 ${cfg.file} 不是 SeedVR 版（缺 SeedVR 第二段或下载格缺 SeedVR 模型软链）`);
+  }
+
   if (model === "moss") {
     run = replaceOnce(
       run,
       '{"width": 1696, "height": 2112, "batch_size": 1}',
-      `{"width": ${width}, "height": ${height}, "batch_size": 1}`,
-      "MOSS latent 尺寸",
+      `{"width": ${baseW}, "height": ${baseH}, "batch_size": 1}`,
+      "MOSS latent 尺寸（SeedVR 底图）",
     );
-    run = replaceOnce(run, '"seed": 42', `"seed": ${seed}`, "MOSS 种子");
+    // 种子：KSampler 与 SeedVR 放大节点各有一个 "seed": 42（管理站的做法也是
+    // 任务种子同步写进 SeedVR 节点），两个都换成任务种子。
+    {
+      const seedHits = run.split('"seed": 42').length - 1;
+      if (seedHits !== 2) {
+        throw new Error(`MOSS 种子应恰好出现 2 次（KSampler + SeedVR），实际 ${seedHits} 次`);
+      }
+      run = run.split('"seed": 42').join(`"seed": ${seed}`);
+    }
+    run = replaceOnce(
+      run,
+      '"resolution": 2048, "max_resolution": 6000',
+      `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
+      "MOSS SeedVR resolution",
+    );
   } else if (model === "qwen") {
     run = replaceOnce(
       run,
       '{"width": 1024, "height": 1024, "batch_size": 1}',
-      `{"width": ${width}, "height": ${height}, "batch_size": 1}`,
-      "Qwen latent 尺寸",
+      `{"width": ${baseW}, "height": ${baseH}, "batch_size": 1}`,
+      "Qwen latent 尺寸（SeedVR 底图）",
     );
-    run = replaceOnce(run, '"resolution": 1024', '"resolution": 2144', "Qwen resolution");
+    run = replaceOnce(run, '"resolution": 1024', `"resolution": ${baseH}`, "Qwen resolution（跟底图高度走，与磁盘模板一致）");
     run = replaceOnce(run, '"noise_seed": 42', `"noise_seed": ${seed}`, "Qwen 种子");
+    run = replaceOnce(run, '"seed": 42', `"seed": ${seed}`, "Qwen SeedVR 种子");
+    run = replaceOnce(
+      run,
+      '"resolution": 2048, "max_resolution": 6000',
+      `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
+      "Qwen SeedVR resolution",
+    );
   } else if (model === "krea2") {
     run = replaceOnce(
       run,
       '{"width": 1024, "height": 1024, "batch_size": 1}',
-      `{"width": ${width}, "height": ${height}, "batch_size": 1}`,
-      "Krea2 latent 尺寸",
+      `{"width": ${baseW}, "height": ${baseH}, "batch_size": 1}`,
+      "Krea2 latent 尺寸（SeedVR 底图）",
     );
     run = replaceOnce(run, '"noise_seed": 42', `"noise_seed": ${seed}`, "Krea2 种子");
+    run = replaceOnce(run, '"seed": 42', `"seed": ${seed}`, "Krea2 SeedVR 种子");
+    run = replaceOnce(
+      run,
+      '"resolution": 2048, "max_resolution": 6000',
+      `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
+      "Krea2 SeedVR resolution",
+    );
   } else if (model === "zimage") {
-    run = replaceOnce(run, "WIDTH = 1024", `WIDTH = ${width}`, "Z-Image 宽度");
-    run = replaceOnce(run, "HEIGHT = 1024", `HEIGHT = ${height}`, "Z-Image 高度");
-    run = replaceOnce(run, '"seed": 42', `"seed": ${seed}`, "Z-Image 种子");
+    run = replaceOnce(run, "WIDTH = 1024", `WIDTH = ${baseW}`, "Z-Image 宽度（SeedVR 底图）");
+    run = replaceOnce(run, "HEIGHT = 1024", `HEIGHT = ${baseH}`, "Z-Image 高度（SeedVR 底图）");
+    // 种子：KSampler 与 SeedVR 放大节点各有一个 "seed": 42，两个都换成任务种子。
+    {
+      const seedHits = run.split('"seed": 42').length - 1;
+      if (seedHits !== 2) {
+        throw new Error(`Z-Image 种子应恰好出现 2 次（KSampler + SeedVR），实际 ${seedHits} 次`);
+      }
+      run = run.split('"seed": 42').join(`"seed": ${seed}`);
+    }
+    run = replaceOnce(
+      run,
+      '"resolution": 2048, "max_resolution": 6000',
+      `"resolution": ${seedvrResolution}, "max_resolution": 6000`,
+      "Z-Image SeedVR resolution",
+    );
   }
 
   run = replaceOnce(
@@ -435,6 +500,15 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
   }
   run = run.split(oldPath).join(newPath);
   disp = disp.split(oldPath).join(newPath);
+
+  // WebP 精细导出与 PNG 同名（SeedVR 第二段的产物）：路径也要换成任务号。
+  const oldWebp = `/kaggle/working/${cfg.base}.webp`;
+  const newWebp = `/kaggle/working/${cfg.prefix}_${jobId}.webp`;
+  if (!run.includes(oldWebp)) {
+    throw new Error(`模板 ${cfg.file} 不是 SeedVR 版（出图格缺 WebP 导出）`);
+  }
+  run = run.split(oldWebp).join(newWebp);
+  disp = disp.split(oldWebp).join(newWebp);
 
   // 出图完成后清掉 ComfyUI 本体与模型缓存（只在出图格末尾执行）
   run = `${run.replace(/\s+$/, "")}\n${OUTPUT_CLEANUP_SNIPPET}\n`;

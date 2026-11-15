@@ -12,6 +12,7 @@ import {
   KREA2_RAY_DATASET,
   MODEL_LABELS,
   NOTEBOOK_KINDS,
+  SEEDVR_DATASET,
   ZIMAGE_LORAS,
   base64ToBytes,
   bytesToBase64,
@@ -711,6 +712,10 @@ async function runJob(job) {
         if (lora) datasetSources = [...datasetSources, lora.dataset];
       }
     }
+    // SeedVR 7B 放大模型走私有数据集（2026-11-15，四模板同步 SeedVR 第二段）：
+    // 四个模板的下载格都会从 /kaggle/input 软链它进 ComfyUI/models/SEEDVR2/，
+    // 没挂就直接报错，所以四模型都挂；被云端拒绝时下面统一取消推送并报数据集名。
+    datasetSources = [...datasetSources, SEEDVR_DATASET];
 
     const slug = `${kernelBaseSlug(job.model)}-${job.id}`;
     const push = await client.pushKernel({
