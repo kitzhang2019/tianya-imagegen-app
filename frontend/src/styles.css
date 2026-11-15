@@ -260,6 +260,38 @@ textarea {
   margin-top: 14px;
 }
 
+/* LoRA 选择区（只在 MOSS / Krea2 / Z-Image 下显示） */
+.lora-box {
+  margin-top: 14px;
+}
+
+.lora-box:empty {
+  display: none;
+}
+
+.lora-title {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.lora-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.lora-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #a855f7;
+  flex: none;
+}
+
 .select-label {
   flex: none;
   width: 42px;

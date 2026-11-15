@@ -17,7 +17,7 @@
 //   桌面调试的限制，真机（原生 HTTP，不走 CORS）不受影响。
 
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
-import { bytesToBase64 } from "./notebook.js";
+import { bytesToBase64, loraLabelForJob } from "./notebook.js";
 
 export const DEFAULT_GALLERY_URL =
   "https://tianya-gallery-bizen7j8-workspace-krgsbt.cloady.io/upload.php";
@@ -47,6 +47,10 @@ export async function pushToGallery({ url, key, job, pngBytes, fileName }) {
     height: String(job.height),
     created_at: new Date(job.createdAt).toISOString(),
   };
+  // LoRA 标签（与管理站推送格式一致）：挂了就写组合标签，没挂发空，画廊详情页才显示得对。
+  if (job.model === "moss" || job.model === "krea2" || job.model === "zimage") {
+    fields.lora = loraLabelForJob(job);
+  }
 
   try {
     if (Capacitor.isNativePlatform()) {

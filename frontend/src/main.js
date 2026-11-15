@@ -8,10 +8,14 @@ import { Directory, Filesystem } from "@capacitor/filesystem";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { Share } from "@capacitor/share";
 import {
+  DEFAULT_ZIMAGE_LORA_KEYS,
+  KREA2_LORA,
   MODEL_LABELS,
   MODEL_NAMES,
+  MOSS_LORA,
   RATIO_KEYS,
   RATIO_LABELS,
+  ZIMAGE_LORAS,
 } from "./lib/notebook.js";
 import {
   STAGE_LABELS,
@@ -83,6 +87,7 @@ app.innerHTML = `
           <span class="select-chev">▾</span>
         </div>
       </div>
+      <div id="lora-box" class="lora-box"></div>
       <button id="btn-submit" class="primary-btn">开始生成</button>
       <p id="form-error" class="error" hidden></p>
     </div>
@@ -238,6 +243,46 @@ const toastEl = $("toast");
 
 let selectedModel = "moss";
 let selectedRatio = "auto";
+// LoRA 选择（按模型记，切换模型回来还留着上次的选择）：
+// MOSS/Krea2 是开关（默认带），Z-Image 是三个复选（默认全带）。
+const loraState = {
+  moss: true,
+  krea2: true,
+  zimage: [...DEFAULT_ZIMAGE_LORA_KEYS],
+};
+
+/** 按当前模型渲染 LoRA 选择区：MOSS/Krea2 一个开关，Z-Image 三个复选，Qwen 不显示。 */
+function renderLoraBox() {
+  const box = $("lora-box");
+  if (!box) return;
+  if (selectedModel === "moss") {
+    box.innerHTML = `<label class="lora-row"><input type="checkbox" data-lora="moss" ${loraState.moss ? "checked" : ""} /> ${MOSS_LORA.label}</label>`;
+  } else if (selectedModel === "krea2") {
+    box.innerHTML = `<label class="lora-row"><input type="checkbox" data-lora="krea2" ${loraState.krea2 ? "checked" : ""} /> ${KREA2_LORA.label}</label>`;
+  } else if (selectedModel === "zimage") {
+    box.innerHTML =
+      `<span class="lora-title">LoRA（可多选，全不选就是不挂）</span>` +
+      ZIMAGE_LORAS.map(
+        (l) =>
+          `<label class="lora-row"><input type="checkbox" data-lora-key="${l.key}" ${loraState.zimage.includes(l.key) ? "checked" : ""} /> ${l.label.replace(/ (\d)/, " LoRA $1")}</label>`,
+      ).join("");
+  } else {
+    box.innerHTML = "";
+  }
+  box.querySelectorAll("input[data-lora]").forEach((input) => {
+    input.addEventListener("change", () => {
+      loraState[input.dataset.lora] = input.checked;
+    });
+  });
+  box.querySelectorAll("input[data-lora-key]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const key = input.dataset.loraKey;
+      loraState.zimage = input.checked
+        ? [...new Set([...loraState.zimage, key])]
+        : loraState.zimage.filter((k) => k !== key);
+    });
+  });
+}
 let currentResultJobId = null;
 let currentTab = "generate";
 let gallerySelectMode = false;
@@ -742,6 +787,7 @@ promptEl.addEventListener("input", () => {
 
 $("model-select").addEventListener("change", (e) => {
   selectedModel = e.target.value;
+  renderLoraBox();
 });
 
 $("ratio-select").addEventListener("change", (e) => {
@@ -765,7 +811,13 @@ submitBtn.addEventListener("click", async () => {
   submitBtn.disabled = true;
   submitBtn.textContent = "提交中…";
   try {
-    await submitJob({ model: selectedModel, prompt, ratioKey: selectedRatio });
+    await submitJob({
+      model: selectedModel,
+      prompt,
+      ratioKey: selectedRatio,
+      useLora: selectedModel === "moss" ? loraState.moss : selectedModel === "krea2" ? loraState.krea2 : undefined,
+      loraKeys: selectedModel === "zimage" ? [...loraState.zimage] : undefined,
+    });
     promptEl.value = "";
     $("prompt-count").textContent = `0 / ${MAX_PROMPT}`;
     toast("已提交，云端排队中（一次最多同时跑 2 个）");
@@ -1016,6 +1068,7 @@ document.addEventListener("keydown", (e) => {
 onJobsChange(renderAll);
 
 populateSelects();
+renderLoraBox();
 renderAll();
 
 // 生成完成/失败的系统通知：首次打开时请求一次通知权限（用户拒绝也不影响生图本身）

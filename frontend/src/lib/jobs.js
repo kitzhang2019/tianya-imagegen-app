@@ -7,11 +7,16 @@ import { Directory, Filesystem } from "@capacitor/filesystem";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { LiveActivities } from "@ciabosoftwaresolutions/capacitor-live-activities";
 import {
+  DEFAULT_ZIMAGE_LORA_KEYS,
+  KREA2_LORA,
+  KREA2_RAY_DATASET,
   MODEL_LABELS,
   NOTEBOOK_KINDS,
+  ZIMAGE_LORAS,
   base64ToBytes,
   bytesToBase64,
   kernelBaseSlug,
+  normalizeLoraKeys,
   outputFileName,
   patchNotebook,
   randomSeed,
@@ -406,8 +411,9 @@ function requireCreds() {
   }
 }
 
-/** 提交一单：只建记录进本地队列，由 pumpQueue 按 2 并发启动。 */
-export async function submitJob({ model, prompt, ratioKey = "auto" }) {
+/** 提交一单：只建记录进本地队列，由 pumpQueue 按 2 并发启动。
+ * useLora：MOSS/Krea2 的 LoRA 开关（默认带）；loraKeys：Z-Image 的 LoRA 选择（默认全带）。 */
+export async function submitJob({ model, prompt, ratioKey = "auto", useLora, loraKeys }) {
   requireCreds();
   const cleanPrompt = String(prompt || "").trim();
   if (!cleanPrompt) throw new Error("提示词不能为空。");
@@ -420,6 +426,9 @@ export async function submitJob({ model, prompt, ratioKey = "auto" }) {
     model,
     prompt: cleanPrompt,
     ratioKey,
+    // LoRA 选择随任务持久化：MOSS/Krea2 存开关（默认带），Z-Image 存 key 列表（默认全带）
+    useLora: model === "moss" || model === "krea2" ? useLora !== false : undefined,
+    loraKeys: model === "zimage" ? normalizeLoraKeys(loraKeys ?? DEFAULT_ZIMAGE_LORA_KEYS) : undefined,
     width: size.width,
     height: size.height,
     seed: randomSeed(),
@@ -453,11 +462,11 @@ export async function submitJob({ model, prompt, ratioKey = "auto" }) {
   return job;
 }
 
-/** 失败任务重提：同参数、新种子、新任务号。 */
+/** 失败任务重提：同参数（LoRA 选择也原样带上）、新种子、新任务号。 */
 export async function retryJob(id) {
   const old = jobs.find((j) => j.id === id);
   if (!old) throw new Error("找不到这条任务");
-  return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto" });
+  return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys });
 }
 
 /** 重新生成：同提示词/模型/比例新开一个任务（新种子），旧图保留，两图互相关联，方便对比。 */
@@ -465,7 +474,7 @@ export async function regenerateJob(id) {
   const old = jobs.find((j) => j.id === id);
   if (!old) throw new Error("找不到这张图");
   if (old.status !== "done") throw new Error("这张图还没完成，不能重新生成");
-  const job = await submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto" });
+  const job = await submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys });
   job.regeneratedFrom = old.id;
   old.regeneratedBy = job.id;
   await saveJobs();
@@ -666,6 +675,8 @@ async function runJob(job) {
       height: job.height,
       seed: job.seed,
       jobId: job.id,
+      useLora: job.useLora,
+      loraKeys: job.loraKeys,
     });
 
     let datasetSources = [];
@@ -685,6 +696,21 @@ async function runJob(job) {
       updateJob(job.id, { stageDetail: `模型数据集已确认（${resolved.ref}），正在推送…` });
       await saveJobs();
     }
+    // 主模型 + LoRA 数据集：Krea2 的 Ray 主模型走私有数据集（模板从 /kaggle/input
+    // 里递归找 Ray 文件，找不到就直接报错，所以 Krea2 单必挂）；HerRAW 也走私有
+    // 数据集（模板本身也从 HF 镜像下载同一文件，数据集挂上是双保险，只在带 LoRA
+    // 时挂）。Z-Image 的三个 LoRA 只能走数据集，模板里没有 HF 兜底。MOSS 的观澜
+    // 走 HF 镜像下载，没有 Kaggle 数据集，不挂。
+    if (job.model === "krea2") {
+      datasetSources = [...datasetSources, KREA2_RAY_DATASET];
+      if (job.useLora !== false) datasetSources = [...datasetSources, KREA2_LORA.dataset];
+    } else if (job.model === "zimage") {
+      const keys = normalizeLoraKeys(job.loraKeys ?? DEFAULT_ZIMAGE_LORA_KEYS);
+      for (const k of keys) {
+        const lora = ZIMAGE_LORAS.find((l) => l.key === k);
+        if (lora) datasetSources = [...datasetSources, lora.dataset];
+      }
+    }
 
     const slug = `${kernelBaseSlug(job.model)}-${job.id}`;
     const push = await client.pushKernel({
@@ -694,9 +720,9 @@ async function runJob(job) {
       datasetSources,
     });
     if (datasetSources.length > 0) {
-      const bad = push.invalidDatasetSources || [];
-      if (bad.some((s) => datasetSources.includes(s))) {
-        throw new Error(`云端拒绝挂接模型数据集（${datasetSources.join("、")}）：推送已取消，请检查数据集是否存在且为私有。`);
+      const bad = (push.invalidDatasetSources || []).filter((s) => datasetSources.includes(s));
+      if (bad.length > 0) {
+        throw new Error(`云端拒绝挂接数据集（${bad.join("、")}）：推送已取消，请检查数据集是否存在且为私有。`);
       }
     }
     const kaggleRef =
