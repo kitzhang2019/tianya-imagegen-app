@@ -11,10 +11,10 @@ import {
   DEFAULT_ZIMAGE_LORA_KEYS,
   MODEL_LABELS,
   NOTEBOOK_KINDS,
+  appKernelSlug,
   base64ToBytes,
   bytesToBase64,
   collectDatasetSources,
-  kernelBaseSlug,
   normalizeLoraKeys,
   normalizeMossLoraKeys,
   normalizeUseUpscale,
@@ -23,7 +23,7 @@ import {
   randomSeed,
   resolveSize,
 } from "./notebook.js";
-import { KaggleClient, KaggleError, normalizeKaggleRef } from "./kaggle.js";
+import { KaggleClient, KaggleError, isNetworkErrorText, normalizeKaggleRef } from "./kaggle.js";
 import { DEFAULT_GALLERY_URL, pushToGallery } from "./gallery.js";
 
 const PREF_JOBS = "tianya-imagegen-jobs";
@@ -46,16 +46,41 @@ const MAX_ACTIVE = 2;
 const POLL_MS = 20000;
 const VERIFY_WINDOW_MS = 5 * 60 * 1000; // 推送后核实 Kernel 的窗口
 const VERIFY_INTERVAL_MS = 30000;
-const PREPARE_BACKSTOP_MS = 20 * 60 * 1000; // preparing 超过 20 分钟没确认到 kernel -> 失败
 const QUEUED_BACKSTOP_MS = 6 * 3600 * 1000; // queued 超过 6 小时 -> 失败
 const DOWNLOAD_BACKSTOP_MS = 10 * 60 * 1000; // downloading 重试超过 10 分钟 -> 失败
 const RECONCILE_AFTER_MS = 20 * 60 * 1000; // queued/running 超过 20 分钟就探输出列表
 const PROBE_BUDGET_MS = 50000;
 const FIND_BUDGET_MS = 150000;
 
+/** 网络是否断开（代理断了 / Kaggle 连不上）。
+ * 断开时任何未完成任务都不标失败，只显示“网络暂时断开，正在重连…”并等网络恢复后
+ * 按固定 slug 核对云端再决定——这是防重复提交的核心。 */
+let networkDown = false;
+const networkListeners = new Set();
+export function isNetworkDown() {
+  return networkDown;
+}
+/** 订阅网络断开/恢复（main.js 的断网横条用它切换显示）。 */
+export function onNetworkChange(fn) {
+  networkListeners.add(fn);
+  return () => networkListeners.delete(fn);
+}
+function setNetworkDown(v) {
+  if (networkDown === v) return;
+  networkDown = v;
+  for (const fn of [...networkListeners]) {
+    try {
+      fn(v);
+    } catch {
+      /* 订阅方出错不影响主流程 */
+    }
+  }
+}
+
 export const STAGE_LABELS = {
   "queued-local": "本地排队",
   preparing: "准备",
+  confirming: "待确认",
   queued: "排队中",
   running: "生成中",
   downloading: "下载回存",
@@ -416,7 +441,7 @@ function requireCreds() {
  * useLora：Krea2 的 LoRA 开关（默认带）；loraKeys：MOSS 的 LoRA 选择（默认只带
  * 观澜，空数组 = 不挂）/ Z-Image 的 LoRA 选择（默认全带）。useUpscale：超分
  * 开关（默认开，false = 底图直接当成品、不挂 SeedVR 数据集）。 */
-export async function submitJob({ model, prompt, ratioKey = "auto", useLora, loraKeys, useUpscale }) {
+export async function submitJob({ model, prompt, ratioKey = "auto", useLora, loraKeys, useUpscale, kaggleSlug }) {
   requireCreds();
   const cleanPrompt = String(prompt || "").trim();
   if (!cleanPrompt) throw new Error("提示词不能为空。");
@@ -449,7 +474,10 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
     stage: "queued-local",
     stageDetail: "本地排队，等空闲的云端会话",
     kaggleRef: null,
-    kaggleSlug: null,
+    // 固定 slug：提交时就按任务 id 定死、存进任务，重推复用同一个 slug，
+    // 绝不每次尝试现算新 slug。带 app- 前缀，与管理站的同名 kernel 区分开
+    // （两边任务号各自计数，撞车会互相覆盖对方的 kernel）。
+    kaggleSlug: kaggleSlug || appKernelSlug(model, id),
     createdAt: Date.now(),
     pushedAt: null,
     verifyDeadlineAt: null,
@@ -475,11 +503,42 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
   return job;
 }
 
-/** 失败任务重提：同参数（LoRA 选择与超分开关也原样带上）、新种子、新任务号。 */
+/** 失败任务重提：先按固定 slug 查云端——
+ *  - 云端已有这单在跑/排队：直接恢复旧任务轮询，不建新任务、不再 push（防重复提交）；
+ *  - 确认云端没有：新开任务（新任务号、新种子），但复用同一个 slug；
+ *  - 网络还没恢复、查不到：不建新任务，直接报错，等网络恢复后再点。
+ * LoRA 选择与超分开关原样带上。 */
 export async function retryJob(id) {
   const old = jobs.find((j) => j.id === id);
   if (!old) throw new Error("找不到这条任务");
-  return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale });
+  requireCreds();
+  const slug = old.kaggleSlug || appKernelSlug(old.model, old.id);
+  const ref = `${settings.kaggleUsername}/${slug}`;
+  const chk = await makeClient().confirmKernelExists(ref);
+  if (chk.exists) {
+    // 云端这单还在：恢复旧任务，继续轮询它，不再 push
+    setNetworkDown(false);
+    updateJob(old.id, {
+      status: "preparing",
+      stage: "preparing",
+      kaggleRef: ref,
+      kaggleSlug: slug,
+      pushedAt: old.pushedAt || Date.now(),
+      verifyDeadlineAt: Date.now() + VERIFY_WINDOW_MS,
+      stageDetail: "云端已找到这单任务，恢复轮询…",
+      error: null,
+      finishedAt: null,
+    });
+    await saveJobs();
+    verifyKernel(old, makeClient());
+    return old;
+  }
+  if (chk.authError) throw new Error(chk.authError);
+  if (chk.inconclusive) {
+    setNetworkDown(true);
+    throw new Error("网络还没恢复，无法确认云端这单的状态，稍后再点重新提交。");
+  }
+  return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale, kaggleSlug: slug });
 }
 
 /** 重新生成：同提示词/模型/比例新开一个任务（新种子），旧图保留，两图互相关联，方便对比。 */
@@ -528,6 +587,8 @@ export function getJobProgress(job) {
     case "queued-local":
       return { pct: 5, label };
     case "preparing":
+      return { pct: 15, label };
+    case "confirming":
       return { pct: 15, label };
     case "queued":
       return { pct: 25, label };
@@ -617,21 +678,26 @@ function pumpQueue() {
 
 async function loadTemplate(model) {
   const file = NOTEBOOK_KINDS[model].file;
-  const url = `${import.meta.env.BASE_URL}notebooks/${file}`;
+  // 纯 Node 测试环境里 import.meta.env 不存在，用 "/" 兜底（测试桩会接管 fetch）。
+  const url = `${import.meta.env?.BASE_URL ?? "/"}notebooks/${file}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`模板 ${file} 读不到（HTTP ${res.status}）`);
   return res.text();
 }
 
-/** 推送后核实 kernel 存在：每 30s 双通道查一次，最多 5 分钟。成功返回 true。 */
+/** 推送后核实 kernel 存在：每 30s 双通道查一次，最多 5 分钟。成功返回 true。
+ * 全程都没拿到“确认不存在”的答复（一直在断网）时，窗口到期也不判失败——
+ * 进待确认，等网络恢复后继续核实。 */
 async function verifyKernel(job, client) {
   if (verifyingJobs.has(job.id)) return false;
   verifyingJobs.add(job.id);
   try {
     const deadline = job.verifyDeadlineAt || Date.now() + VERIFY_WINDOW_MS;
+    let sawConclusiveAbsent = false;
     while (Date.now() < deadline) {
       const chk = await client.confirmKernelExists(job.kaggleRef);
       if (chk.exists) {
+        setNetworkDown(false);
         const state = chk.state;
         updateJob(job.id, {
           status: state === "running" ? "running" : state === "complete" ? "running" : "queued",
@@ -650,15 +716,40 @@ async function verifyKernel(job, client) {
         await failJob(job, chk.authError);
         return false;
       }
-      updateJob(job.id, {
-        stageDetail: `云端已接受推送，正在核实（${chk.detail}）`,
-      });
+      if (chk.inconclusive) {
+        // 网络断开、没拿到确定答复：不判失败，进待确认；窗口往后延一轮，
+        // 下次轮询（或这次循环的下一次）继续核实
+        setNetworkDown(true);
+        updateJob(job.id, {
+          status: "preparing",
+          stage: "confirming",
+          verifyDeadlineAt: Date.now() + VERIFY_WINDOW_MS,
+          stageDetail: "网络暂时断开，正在重连…（云端任务已在，恢复后继续核实）",
+        });
+      } else {
+        sawConclusiveAbsent = true;
+        updateJob(job.id, {
+          stageDetail: `云端已接受推送，正在核实（${chk.detail}）`,
+        });
+      }
       await saveJobs();
       const left = deadline - Date.now();
       if (left <= 0) break;
       await sleep(Math.min(VERIFY_INTERVAL_MS, left));
       // 任务可能在等待期间被删
       if (!jobs.some((j) => j.id === job.id)) return false;
+    }
+    if (!sawConclusiveAbsent) {
+      // 全程断网、一次都没确认到“不在”：不判失败，进待确认，等网络恢复后继续核实
+      setNetworkDown(true);
+      updateJob(job.id, {
+        status: "preparing",
+        stage: "confirming",
+        verifyDeadlineAt: Date.now() + VERIFY_WINDOW_MS,
+        stageDetail: "网络暂时断开，正在重连…（云端任务已在，恢复后继续核实）",
+      });
+      await saveJobs();
+      return false;
     }
     await failJob(
       job,
@@ -731,13 +822,61 @@ async function runJob(job) {
       moodyRef,
     });
 
-    const slug = `${kernelBaseSlug(job.model)}-${job.id}`;
-    const push = await client.pushKernel({
-      slug,
-      title: slug,
-      text,
-      datasetSources,
-    });
+    // 提交幂等：push 之前先按固定 slug 查云端——之前某次 push 的回包可能
+    // 丢了（代理断开），kernel 其实已在云端排队/生成，再推就是重复提交。
+    const slug = job.kaggleSlug || appKernelSlug(job.model, job.id);
+    if (!job.kaggleSlug) updateJob(job.id, { kaggleSlug: slug });
+    const preChk = await client.confirmKernelExists(`${settings.kaggleUsername}/${slug}`);
+    if (preChk.exists) {
+      // 云端已有这单：不再 push，直接恢复轮询
+      setNetworkDown(false);
+      updateJob(job.id, {
+        kaggleRef: `${settings.kaggleUsername}/${slug}`,
+        pushedAt: job.pushedAt || Date.now(),
+        verifyDeadlineAt: Date.now() + VERIFY_WINDOW_MS,
+        stageDetail: "云端已找到这单任务，恢复轮询…",
+      });
+      await saveJobs();
+      await verifyKernel(job, client);
+      return;
+    }
+    if (preChk.authError) {
+      throw new Error(preChk.authError);
+    }
+    if (preChk.inconclusive) {
+      // 网络断开、查不到：不 push、不失败，进待确认，等网络恢复后轮询再查
+      setNetworkDown(true);
+      updateJob(job.id, {
+        status: "preparing",
+        stage: "confirming",
+        stageDetail: "网络暂时断开，正在重连…（已提交的任务不会重复推）",
+      });
+      await saveJobs();
+      return;
+    }
+    let push;
+    try {
+      push = await client.pushKernel({
+        slug,
+        title: slug,
+        text,
+        datasetSources,
+      });
+    } catch (e) {
+      // push 请求本身因网络断开拿不到回包：请求可能已到云端建出 kernel，
+      // 绝不能标失败——进待确认，等网络恢复后按 slug 查状态再决定
+      if (isNetworkErrorText(e instanceof Error ? e.message : String(e))) {
+        setNetworkDown(true);
+        updateJob(job.id, {
+          status: "preparing",
+          stage: "confirming",
+          stageDetail: "网络暂时断开，正在重连…（已提交的任务不会重复推）",
+        });
+        await saveJobs();
+        return;
+      }
+      throw e;
+    }
     if (datasetSources.length > 0) {
       const bad = (push.invalidDatasetSources || []).filter((s) => datasetSources.includes(s));
       if (bad.length > 0) {
@@ -761,7 +900,21 @@ async function runJob(job) {
   } catch (e) {
     const current = jobs.find((j) => j.id === job.id);
     if (current && !isTerminal(current)) {
-      await failJob(job, e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      // 网络断开类错误（模板读不到 / Moody 数据集核实连不上等）：push 可能
+      // 已发出、也可能没发出，两种情况都不能标失败——进待确认，等网络恢复后
+      // 按 slug 查云端再决定（在就恢复轮询，不在就重新推）。
+      if (isNetworkErrorText(msg)) {
+        setNetworkDown(true);
+        updateJob(job.id, {
+          status: "preparing",
+          stage: "confirming",
+          stageDetail: "网络暂时断开，正在重连…（已提交的任务不会重复推）",
+        });
+        await saveJobs();
+      } else {
+        await failJob(job, msg);
+      }
     }
   } finally {
     busyJobs.delete(job.id);
@@ -860,10 +1013,23 @@ async function finishJob(job, url = null) {
   } catch (e) {
     const current = jobs.find((j) => j.id === job.id);
     if (!current || isTerminal(current)) return;
+    const msg = e instanceof KaggleError || e instanceof Error ? e.message : String(e);
+    // 网络断开：图已在云端，只等重连下载——不判失败（也不受 10 分钟上限），
+    // 等网络恢复后下一轮继续下载
+    if (isNetworkErrorText(msg)) {
+      setNetworkDown(true);
+      updateJob(job.id, {
+        status: "downloading",
+        stage: "downloading",
+        stageDetail: "网络暂时断开，正在重连…（图已在云端，恢复后继续下载）",
+      });
+      await saveJobs();
+      return;
+    }
     // 下载失败先留在 downloading，下一轮再试；超过 10 分钟才判失败
     const since = current.downloadStartedAt || Date.now();
     if (Date.now() - since > DOWNLOAD_BACKSTOP_MS) {
-      await failJob(job, e instanceof KaggleError || e instanceof Error ? e.message : String(e));
+      await failJob(job, msg);
     } else {
       updateJob(job.id, {
         status: "downloading",
@@ -886,19 +1052,40 @@ async function tick() {
     const now = Date.now();
     try {
       if (job.status === "preparing") {
-        // 推送前中断的 preparing（应用重启后）：没有 kaggleRef 说明根本没推上去
+        // 没有 kaggleRef：可能只是 push 回包丢了（代理断开）或重启中断，kernel
+        // 可能已在云端——先按固定 slug 查云端，绝不直接判失败、绝不直接重推。
         if (!job.kaggleRef) {
-          await failJob(job, "上次提交在准备阶段中断（应用重启前没来得及推送），请重新提交。");
+          const slug = job.kaggleSlug || appKernelSlug(job.model, job.id);
+          if (!job.kaggleSlug) updateJob(job.id, { kaggleSlug: slug });
+          const chk = await makeClient().confirmKernelExists(`${settings.kaggleUsername}/${slug}`);
+          if (chk.exists) {
+            setNetworkDown(false);
+            updateJob(job.id, {
+              kaggleRef: `${settings.kaggleUsername}/${slug}`,
+              pushedAt: job.pushedAt || Date.now(),
+              verifyDeadlineAt: Date.now() + VERIFY_WINDOW_MS,
+              stageDetail: "云端已找到这单任务，恢复轮询…",
+            });
+            await saveJobs();
+            if (!verifyingJobs.has(job.id)) verifyKernel(job, makeClient());
+          } else if (chk.authError) {
+            await failJob(job, chk.authError);
+          } else if (chk.inconclusive) {
+            // 网络断开、查不到：进待确认，等网络恢复后继续查，不重推
+            setNetworkDown(true);
+            updateJob(job.id, {
+              stage: "confirming",
+              stageDetail: "网络暂时断开，正在重连…（已提交的任务不会重复推）",
+            });
+            await saveJobs();
+          } else {
+            // 确认云端没有这单：重新走提交流程（runJob 开头会再查一次，查到就不再推）
+            if (!busyJobs.has(job.id)) runJob(job);
+          }
           continue;
         }
-        if (job.verifyDeadlineAt && now > job.verifyDeadlineAt) {
-          await failJob(job, "推送后 5 分钟内没在云端核实到任务，任务从未进入排队。可以点「重新提交」再试。");
-          continue;
-        }
-        if (now - (job.pushedAt || job.createdAt) > PREPARE_BACKSTOP_MS) {
-          await failJob(job, "准备阶段超过 20 分钟仍没确认到任务，已自动结束。请重新提交。");
-          continue;
-        }
+        // 有 kaggleRef：5 分钟核实窗口由 verifyKernel 自己管（断网时不判失败，
+        // 窗口会往后延）；这里不再另设 20 分钟硬上限。
         if (!verifyingJobs.has(job.id)) verifyKernel(job, makeClient());
         continue;
       }
@@ -925,6 +1112,8 @@ async function tick() {
         await failJob(job, st.error);
         continue;
       }
+      // 拿到确定状态 = 网络通了，断网横条可以消失
+      if (!st.error && st.state !== "unknown") setNetworkDown(false);
       if (st.state === "complete") {
         await finishJob(job);
         continue;
@@ -991,15 +1180,21 @@ export function stopPolling() {
   }
 }
 
+/** 仅测试用：手动跑一轮轮询（真机上由 startPolling 的定时器驱动）。 */
+export function __tickForTest() {
+  return tick();
+}
+
 /** 应用打开时恢复：未终态的任务继续轮询；中断在准备阶段的按规则处理。 */
 export async function initJobs() {
   if (inited) return;
   inited = true;
   await loadAll();
-  // 重启后：preparing 但没推上去的任务直接失败（runJob 已不在）
+  // 重启后：preparing 但还没 kaggleRef 的任务不直接失败——push 回包可能丢了，
+  // kernel 可能已在云端；先标成待确认，轮询时会按固定 slug 查云端再决定。
   for (const job of [...jobs]) {
     if (job.status === "preparing" && !job.kaggleRef) {
-      await failJob(job, "上次提交在准备阶段中断（应用重启前没来得及推送），请重新提交。");
+      updateJob(job.id, { stage: "confirming", stageDetail: "应用重启，正在确认云端是否已建出任务…" });
     }
   }
   await saveJobs();

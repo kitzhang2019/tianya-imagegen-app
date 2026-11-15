@@ -140,6 +140,14 @@ export function kernelBaseSlug(model) {
   );
 }
 
+/** App 任务的固定 kernel slug：带 app- 前缀，与管理站的 <model>-comfyui-kaggle-<id>
+ * 区分开——两边任务号是各自计数的，同一数字会撞到同一个 kernel（已实测：
+ * App 的 job 2 推到了管理站旧 kernel moss-comfyui-kaggle-2 上并重新跑了一遍）。
+ * 每个任务提交时就固定下来存进 job，重推复用同一个 slug，不再另起。 */
+export function appKernelSlug(model, jobId) {
+  return `app-${kernelBaseSlug(model)}-${jobId}`;
+}
+
 export function outputFileName(model, jobId) {
   const prefix = (NOTEBOOK_KINDS[model] ?? NOTEBOOK_KINDS.moss).prefix;
   return `${prefix}_${jobId}.png`;

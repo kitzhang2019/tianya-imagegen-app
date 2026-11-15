@@ -24,6 +24,13 @@ export class KaggleError extends Error {
   }
 }
 
+/** 是不是网络断开类错误（代理断了、fetch 抛错、超时），而不是 Kaggle 明确拒绝。
+ * 这类错误下请求可能已到云端、回包丢了——调用方绝不能据此判定任务失败或重推。 */
+export function isNetworkErrorText(text) {
+  const s = String(text || "");
+  return /连不上|Failed to fetch|NetworkError|Network request failed|abort|timeout|timed out|ECONN|ENOTFOUND|EAI_AGAIN|offline|网络/i.test(s);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -447,11 +454,12 @@ export class KaggleClient {
     return result;
   }
 
-  /** Token 归属账号的 kernel 列表里有没有这个 ref（true/false/null=问不到）。 */
+  /** Token 归属账号的 kernel 列表里有没有这个 ref（true/false/null=问不到）。
+   * pageSize 100：账号下共约 84 个 kernel，一页全覆盖，避免翻页漏查把已有的判成没有。 */
   async kernelListed(ref) {
     let res;
     try {
-      res = await this._fetchJson(`${KAGGLE_API_BASE}/kernels/list?group=profile&pageSize=50`, { method: "GET", timeoutMs: 15000 });
+      res = await this._fetchJson(`${KAGGLE_API_BASE}/kernels/list?group=profile&pageSize=100`, { method: "GET", timeoutMs: 15000 });
     } catch {
       return null;
     }
@@ -464,32 +472,46 @@ export class KaggleClient {
     return false;
   }
 
-  /** 双通道确认 kernel 存在：状态接口 + Token 账号的 kernel 列表。 */
+  /** 双通道确认 kernel 存在：状态接口 + Token 账号的 kernel 列表。
+   * 返回里多了 inconclusive：true = 两边都没拿到确定答复（网络断开），
+   * 调用方此时绝不能断言 kernel 不存在、更不能据此重推，只能等网络恢复再查。
+   * 只有 inconclusive=false 且 exists=false，才是“确认不在云端”。 */
   async confirmKernelExists(ref) {
     const st = await this.kernelStatus(ref);
     if (!st.error && st.state !== "unknown") {
-      return { exists: true, state: st.state, viaList: false, authError: null, detail: `状态接口已应答（状态 ${st.state}）` };
+      return { exists: true, state: st.state, viaList: false, authError: null, inconclusive: false, detail: `状态接口已应答（状态 ${st.state}）` };
+    }
+    if (st.notFound) {
+      return { exists: false, state: null, viaList: false, authError: null, inconclusive: false, detail: `状态接口返回 404，云端没有这个任务` };
     }
     if (!st.error) {
+      // 状态接口回了不认识的状态值：用列表兜底
       const listed = await this.kernelListed(ref);
       if (listed === true) {
-        return { exists: true, state: null, viaList: true, authError: null, detail: "Token 归属账号的 Kernel 列表里已有这个 Kernel（状态接口返回了本站不认识的状态值）" };
+        return { exists: true, state: null, viaList: true, authError: null, inconclusive: false, detail: "Token 归属账号的 Kernel 列表里已有这个 Kernel（状态接口返回了本站不认识的状态值）" };
+      }
+      if (listed === false) {
+        return {
+          exists: false, state: null, viaList: false, authError: null, inconclusive: false,
+          detail: `状态接口返回了本站不认识的状态值${st.raw ? `「${st.raw}」` : ""}；Token 归属账号的 Kernel 列表里也没有它`,
+        };
       }
       return {
-        exists: false, state: null, viaList: false, authError: null,
-        detail: `状态接口返回了本站不认识的状态值${st.raw ? `「${st.raw}」` : ""}；${listed === false ? "Token 归属账号的 Kernel 列表里也没有它" : "Kernel 列表这次没读到（无法确认）"}`,
+        exists: false, state: null, viaList: false, authError: null, inconclusive: true,
+        detail: `状态接口返回了本站不认识的状态值${st.raw ? `「${st.raw}」` : ""}；Kernel 列表这次没读到（无法确认）`,
       };
     }
     if (st.error.includes("401")) {
-      return { exists: false, state: null, viaList: false, authError: st.error, detail: st.error };
+      return { exists: false, state: null, viaList: false, authError: st.error, inconclusive: false, detail: st.error };
     }
+    // 状态接口连不上（网络断开）：列表找到算存在，找不到也不算不存在——没拿到确定答复
     const listed = await this.kernelListed(ref);
     if (listed === true) {
-      return { exists: true, state: null, viaList: true, authError: null, detail: "Token 归属账号的 Kernel 列表里已有这个 Kernel（kernels/status 还没跟上）" };
+      return { exists: true, state: null, viaList: true, authError: null, inconclusive: false, detail: "Token 归属账号的 Kernel 列表里已有这个 Kernel（kernels/status 还没跟上）" };
     }
-    const statusPart = st.notFound ? `kernels/status 对 ${ref} 返回 404` : `kernels/status 查不到（${st.error}）`;
-    const listPart = listed === false ? "Token 归属账号的 Kernel 列表里也没有它" : "Kernel 列表这次没读到（无法确认）";
-    return { exists: false, state: null, viaList: false, authError: null, detail: `${statusPart}；${listPart}` };
+    const statusPart = `kernels/status 查不到（${st.error}）`;
+    const listPart = listed === false ? "Kernel 列表这次也没翻到它（仍无法确认）" : "Kernel 列表这次没读到（无法确认）";
+    return { exists: false, state: null, viaList: false, authError: null, inconclusive: true, detail: `${statusPart}；${listPart}` };
   }
 
   /**

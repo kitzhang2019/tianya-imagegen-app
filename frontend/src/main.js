@@ -30,8 +30,10 @@ import {
   getSettings,
   getThumbSrc,
   initJobs,
+  isNetworkDown,
   maskSecret,
   onJobsChange,
+  onNetworkChange,
   pushJobToGallery,
   regenerateJob,
   retryJob,
@@ -63,6 +65,7 @@ app.innerHTML = `
     </div>
   </div>
 </header>
+<div id="net-banner" class="net-banner" hidden>网络暂时断开，正在重连…</div>
 
 <main class="page">
   <!-- 生图 -->
@@ -864,8 +867,10 @@ async function handleJobListClick(e) {
   if (retryBtn) {
     retryBtn.disabled = true;
     try {
-      await retryJob(Number(retryBtn.dataset.retry));
-      toast("已用新种子重新提交");
+      const retriedId = Number(retryBtn.dataset.retry);
+      const retried = await retryJob(retriedId);
+      // retryJob 可能恢复云端还在跑的旧单（同 id），也可能新开一单（新 id）
+      toast(retried.id === retriedId ? "云端这单还在，正在继续轮询" : "已用新种子重新提交");
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err));
     }
@@ -1104,3 +1109,13 @@ if (Capacitor.isNativePlatform()) {
 initJobs().catch((e) => {
   toast(`初始化失败：${e instanceof Error ? e.message : String(e)}`);
 });
+
+// 断网横条：网络断开时显示“网络暂时断开，正在重连…”，重连成功后消失。
+// 任务本身不标失败，横条只是提示。
+const netBanner = document.getElementById("net-banner");
+if (netBanner) {
+  onNetworkChange((down) => {
+    netBanner.hidden = !down;
+  });
+  netBanner.hidden = !isNetworkDown();
+}

@@ -1,10 +1,11 @@
 // tests/jobs-upscale.test.mjs — 超分开关在任务层的测试：提交存开关、
 // 重提/重新生成按原选择重放、老任务（没有 useUpscale 字段）按开处理。
-// 跑法：npm test。注意：测试环境里 runJob 会在后台跑起来、但 loadTemplate
-// 读不到 Vite 的 import.meta.env.BASE_URL 而失败，任务会被标失败——
+// 跑法：npm test。注意：测试环境里 runJob 会在后台跑起来；fetch 桩让它能读到
+// 磁盘真模板、云端一律答“没有这单”，所以重提正常建新单、后台推送走完流程——
 // 这里只断言任务记录里的 useUpscale 选择，不测云端推送本身。
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { __seedStore, __resetStore } from "./stubs/capacitor-preferences.mjs";
 import {
   getJobs,
@@ -17,7 +18,51 @@ import {
 } from "../src/lib/jobs.js";
 import { upscalerLabelForJob } from "../src/lib/notebook.js";
 
+const realFetch = globalThis.fetch;
+
+function jsonRes(status, obj) {
+  const text = JSON.stringify(obj);
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: (name) => (String(name).toLowerCase() === "content-type" ? "application/json" : null) },
+    text: async () => text,
+    arrayBuffer: async () => new TextEncoder().encode(text).buffer,
+  };
+}
+
+function textRes(status, text) {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: () => "text/plain" },
+    text: async () => text,
+    arrayBuffer: async () => new TextEncoder().encode(text).buffer,
+  };
+}
+
+// fetch 桩：模板按模型读磁盘真文件；retryJob 前的云端核对一律答“没有这单”，
+// 让重提正常建新单；其他 Kaggle 查询答空，后台 runJob 走失败/待确认分支，
+// 不影响这里对任务记录的断言。
+const templates = {};
+for (const m of ["moss", "qwen", "krea2", "zimage"]) {
+  templates[m] = fs.readFileSync(new URL(`../public/notebooks/${m}-comfyui-kaggle.ipynb`, import.meta.url), "utf8");
+}
+globalThis.fetch = async (url, opts) => {
+  const u = String(url);
+  if (u.includes("notebooks/")) {
+    const m = ["moss", "qwen", "krea2", "zimage"].find((x) => u.includes(x)) || "qwen";
+    return textRes(200, templates[m]);
+  }
+  if (u.includes("GetKernelSessionStatus")) return jsonRes(404, { error: "not found" });
+  // push 直接拒掉：这里不测真推，后台 runJob 立刻失败，不进 5 分钟核实循环。
+  if (u.includes("/kernels/push")) return jsonRes(400, { error: { message: "测试桩：不真推" } });
+  if (u.includes("kernels/list")) return jsonRes(200, []);
+  return jsonRes(404, { error: "not found" });
+};
+
 after(() => {
+  globalThis.fetch = realFetch;
   stopPolling();
   __resetStore();
 });

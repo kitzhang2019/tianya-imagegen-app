@@ -1056,6 +1056,17 @@ textarea {
   color: #fff;
 }
 
+/* ---------- 断网横条 ---------- */
+/* 网络断开时顶栏下的临时提示：任务不标失败，只显示它；重连成功后由 JS 藏起来。 */
+.net-banner {
+  padding: 9px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: #fde68a;
+  background: rgba(120, 53, 15, 0.88);
+  border-bottom: 1px solid rgba(253, 230, 138, 0.35);
+}
+
 /* ---------- 提示气泡 ---------- */
 .toast {
   position: fixed;
