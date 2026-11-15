@@ -7,6 +7,7 @@ import { Directory, Filesystem } from "@capacitor/filesystem";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { LiveActivities } from "@ciabosoftwaresolutions/capacitor-live-activities";
 import {
+  DEFAULT_MOSS_LORA_KEYS,
   DEFAULT_ZIMAGE_LORA_KEYS,
   KREA2_LORA,
   KREA2_RAY_DATASET,
@@ -18,7 +19,9 @@ import {
   base64ToBytes,
   bytesToBase64,
   kernelBaseSlug,
+  mossLoraDatasets,
   normalizeLoraKeys,
+  normalizeMossLoraKeys,
   outputFileName,
   patchNotebook,
   randomSeed,
@@ -414,7 +417,8 @@ function requireCreds() {
 }
 
 /** 提交一单：只建记录进本地队列，由 pumpQueue 按 2 并发启动。
- * useLora：MOSS/Krea2 的 LoRA 开关（默认带）；loraKeys：Z-Image 的 LoRA 选择（默认全带）。 */
+ * useLora：Krea2 的 LoRA 开关（默认带）；loraKeys：MOSS 的 LoRA 选择（默认只带
+ * 观澜，空数组 = 不挂）/ Z-Image 的 LoRA 选择（默认全带）。 */
 export async function submitJob({ model, prompt, ratioKey = "auto", useLora, loraKeys }) {
   requireCreds();
   const cleanPrompt = String(prompt || "").trim();
@@ -428,9 +432,16 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
     model,
     prompt: cleanPrompt,
     ratioKey,
-    // LoRA 选择随任务持久化：MOSS/Krea2 存开关（默认带），Z-Image 存 key 列表（默认全带）
-    useLora: model === "moss" || model === "krea2" ? useLora !== false : undefined,
-    loraKeys: model === "zimage" ? normalizeLoraKeys(loraKeys ?? DEFAULT_ZIMAGE_LORA_KEYS) : undefined,
+    // LoRA 选择随任务持久化：MOSS 存 key 列表（默认只带观澜；旧任务只有 useLora
+    // 开关时，false = 不挂，否则默认只带观澜），Krea2 存开关（默认带），
+    // Z-Image 存 key 列表（默认全带）。重提/重新生成按原选择重放。
+    useLora: model === "krea2" ? useLora !== false : undefined,
+    loraKeys:
+      model === "moss"
+        ? normalizeMossLoraKeys(loraKeys ?? (useLora === false ? [] : DEFAULT_MOSS_LORA_KEYS))
+        : model === "zimage"
+          ? normalizeLoraKeys(loraKeys ?? DEFAULT_ZIMAGE_LORA_KEYS)
+          : undefined,
     width: size.width,
     height: size.height,
     seed: randomSeed(),
@@ -704,8 +715,14 @@ async function runJob(job) {
     // 时挂）。Z-Image 的 PornMaster 主模型也走私有数据集（模板从 /kaggle/input
     // 里递归找 PornMaster 文件，找不到就直接报错，所以 Z-Image 单必挂）；三个
     // LoRA 只能走数据集，模板里没有 HF 兜底。MOSS 的观澜
-    // 走 HF 镜像下载，没有 Kaggle 数据集，不挂。
-    if (job.model === "krea2") {
+    // 走 HF 镜像下载，没有 Kaggle 数据集，不挂；Blender3D 只能走私有数据集，
+    // 只在选中 Blender3D 时挂。
+    if (job.model === "moss") {
+      datasetSources = [
+        ...datasetSources,
+        ...mossLoraDatasets(job.loraKeys ?? (job.useLora === false ? [] : DEFAULT_MOSS_LORA_KEYS)),
+      ];
+    } else if (job.model === "krea2") {
       datasetSources = [...datasetSources, KREA2_RAY_DATASET];
       if (job.useLora !== false) datasetSources = [...datasetSources, KREA2_LORA.dataset];
     } else if (job.model === "zimage") {

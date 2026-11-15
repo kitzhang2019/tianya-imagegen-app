@@ -146,7 +146,8 @@ export function outputFileName(model, jobId) {
 }
 
 // --- LoRA 选择（2026-11-15，用户定版）---
-// MOSS：观澜 0.8（默认带，HF 镜像下载，无 Kaggle 数据集）；
+// MOSS：观澜 0.8（默认带，HF 镜像下载，无 Kaggle 数据集）+ Blender3D 1.0
+// （默认不带，Kaggle 私有数据集 kitzhang2019/moss-blender3d-lora-v2）；
 // Krea2：HerRAW 0.3（默认带，HF 镜像下载 + Kaggle 数据集 herraw-sensual-krea2）；
 // Z-Image：HerRAW 0.8 + 瑶光 1.0 + ostris 1.0（默认全带，各自走 Kaggle 数据集）。
 export const MOSS_LORA = {
@@ -155,6 +156,20 @@ export const MOSS_LORA = {
   strength: 0.8,
   label: "观澜 LoRA 0.8",
 };
+// MOSS 双 LoRA 注册表（2026-11-15，Blender3D 加入）：顺序固定观澜 → Blender3D。
+// label 是画廊标签；switchLabel 是表单开关上显示的文字（Blender3D 开关只写
+// "Blender3D 1.0"，与任务要求一致）。
+export const MOSS_LORAS = [
+  { key: "guanlan", file: "KOOK-MOSS-SFT-观澜.safetensors", strength: 0.8, label: "观澜 LoRA 0.8", switchLabel: "观澜 LoRA 0.8" },
+  { key: "blender3d", file: "Moss_Blender3D_V2.safetensors", strength: 1.0, dataset: "kitzhang2019/moss-blender3d-lora-v2", label: "Blender3D LoRA 1.0", switchLabel: "Blender3D 1.0" },
+];
+export const DEFAULT_MOSS_LORA_KEYS = ["guanlan"];
+// Blender3D 数据集（Kaggle 私有，145,157,344 字节已核实）：观澜走 HF 不挂数据集。
+export const MOSS_BLENDER3D_DATASET = "kitzhang2019/moss-blender3d-lora-v2";
+// Blender3D 触发词（2026-11-15，用户要求）：选中 Blender3D 时提示词里没有
+// @blender 就在末尾追加整串，一个都不能丢；已经有 @blender 就什么都不加。
+export const MOSS_BLENDER3D_TRIGGER =
+  "@blender, dreamy smooth polished body rendering, wet oily skin look, anime style with realistic skin reflection";
 export const KREA2_LORA = {
   file: "HerRAW_Sensual_v0.2.safetensors",
   repo: "RunningHubAI/rh-herraw-sensual-v0.2-lora",
@@ -178,6 +193,26 @@ export const ZIMAGE_LORAS = [
 ];
 export const DEFAULT_ZIMAGE_LORA_KEYS = ZIMAGE_LORAS.map((l) => l.key);
 
+/** 把任意输入规整成 MOSS LoRA key 列表：只留认识的、去重、按注册表顺序排。 */
+export function normalizeMossLoraKeys(keys) {
+  const wanted = new Set(Array.isArray(keys) ? keys.map((k) => String(k)) : []);
+  return MOSS_LORAS.filter((l) => wanted.has(l.key)).map((l) => l.key);
+}
+
+/** MOSS LoRA 组合标签（与管理站推送格式一致），没挂返回 ""。 */
+export function mossLoraLabel(keys) {
+  return normalizeMossLoraKeys(keys)
+    .map((k) => MOSS_LORAS.find((l) => l.key === k).label)
+    .join(" + ");
+}
+
+/** MOSS 选中 LoRA 对应的 Kaggle 数据集（观澜走 HF 镜像，不挂数据集；Blender3D 只走数据集）。 */
+export function mossLoraDatasets(keys) {
+  return normalizeMossLoraKeys(keys)
+    .map((k) => MOSS_LORAS.find((l) => l.key === k).dataset)
+    .filter(Boolean);
+}
+
 /** 把任意输入规整成 Z-Image LoRA key 列表：只留认识的、去重、按注册表顺序排。 */
 export function normalizeLoraKeys(keys) {
   const wanted = new Set(Array.isArray(keys) ? keys.map((k) => String(k)) : []);
@@ -191,10 +226,13 @@ export function zimageLoraLabel(keys) {
     .join(" + ");
 }
 
-/** 一条任务的 LoRA 标签：MOSS/Krea2 看 useLora（默认带），Z-Image 看 loraKeys。 */
+/** 一条任务的 LoRA 标签：MOSS 看 loraKeys（新任务）或 useLora（旧任务，默认带观澜），Krea2 看 useLora（默认带），Z-Image 看 loraKeys。 */
 export function loraLabelForJob(job) {
   if (!job) return "";
-  if (job.model === "moss") return job.useLora === false ? "" : MOSS_LORA.label;
+  if (job.model === "moss") {
+    if (job.loraKeys !== undefined) return mossLoraLabel(job.loraKeys);
+    return job.useLora === false ? "" : MOSS_LORA.label;
+  }
   if (job.model === "krea2") return job.useLora === false ? "" : KREA2_LORA.label;
   if (job.model === "zimage") return zimageLoraLabel(job.loraKeys ?? DEFAULT_ZIMAGE_LORA_KEYS);
   return "";
@@ -290,8 +328,11 @@ function replaceOnce(text, oldStr, newStr, label) {
  * 给 notebook 模板打补丁。
  * @param {string|object} template - notebook JSON 文本或已解析对象
  * @param {{model:string, prompt:string, width:number, height:number, seed:number, jobId:number, useLora?:boolean, loraKeys?:string[]}} opts
- *   useLora：MOSS/Krea2 的 LoRA 开关（默认带，false 时清空 LORA_NAME）；
- *   loraKeys：Z-Image 的 LoRA 选择（默认全带，空数组 = 不挂）。
+ *   useLora：Krea2 的 LoRA 开关（默认带，false 时清空 LORA_NAME）；MOSS 旧任务
+ *   的开关（新任务走 loraKeys，未传时 useLora=false = 不挂，否则默认只带观澜）；
+ *   loraKeys：MOSS / Z-Image 的 LoRA 选择（MOSS 默认只带观澜，空数组 = 不挂；
+ *   Z-Image 默认全带，空数组 = 不挂）。MOSS 选中 Blender3D 时提示词没有
+ *   @blender 会自动在末尾追加整串触发词，已有则不加。
  * @returns {{text:string, notebook:object}} text 为可直接推送的 notebook JSON 字符串
  * （cell source 已按 Kaggle 官方客户端的方式归一化为单个字符串，code cell 输出已清空）。
  * 失败时抛错，绝不返回半成品。
@@ -319,17 +360,33 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
   }
 
   // LoRA 选择：只改下载格（cell 3）的 LORA_NAME / LORA_NAMES，出图格按它走。
-  // MOSS/Krea2 是单 LoRA 开关：关 = 清空 LORA_NAME；开 = 模板默认值必须已是接线版。
+  // MOSS 是双选：按选择重写 LORA_NAMES 里的 key 元组（默认只带观澜）。
+  // Krea2 是单 LoRA 开关：关 = 清空 LORA_NAME；开 = 模板默认值必须已是接线版。
   // Z-Image 是多选：按选择重写 LORA_NAMES 里的 key 元组。
+  // MOSS 的选择先算出来：触发词追加也要按它判断。
+  const mossKeys =
+    model === "moss"
+      ? loraKeys !== undefined
+        ? normalizeMossLoraKeys(loraKeys)
+        : useLora === false
+          ? []
+          : [...DEFAULT_MOSS_LORA_KEYS]
+      : null;
   let dlChanged = false;
   if (model === "moss") {
-    if (!dl.includes(`LORA_NAME = "${MOSS_LORA.file}"`)) {
-      throw new Error("MOSS 模板的下载格不是观澜接线版（LORA_NAME 应为观澜文件）");
+    if (!dl.includes("MOSS_LORAS = {")) {
+      throw new Error("MOSS 模板的下载格不是两 LoRA 注册表版（缺 MOSS_LORAS 注册表）");
     }
-    if (useLora === false) {
-      dl = replaceOnce(dl, `LORA_NAME = "${MOSS_LORA.file}"`, 'LORA_NAME = ""', "MOSS 不带 LoRA");
-      dlChanged = true;
+    // 注意：单元素元组必须带尾逗号 ("blender3d",)，否则 ("blender3d") 只是字符串，
+    // for 循环会逐字符迭代报 KeyError（管理站 2026-11-15 抓到过的同款 bug）。
+    const tuple = mossKeys.length === 1 ? `"${mossKeys[0]}",` : mossKeys.map((k) => `"${k}"`).join(", ");
+    const re = /LORA_NAMES = \[MOSS_LORAS\[k\] for k in \([^)]*\)\]/;
+    const hits = dl.match(re);
+    if (!hits || hits.length !== 1) {
+      throw new Error(`MOSS LORA_NAMES 赋值应恰好出现 1 次，实际 ${hits ? hits.length : 0} 次`);
     }
+    dl = dl.replace(re, `LORA_NAMES = [MOSS_LORAS[k] for k in (${tuple})]`);
+    dlChanged = true;
   } else if (model === "krea2") {
     if (!dl.includes(`LORA_NAME = "${KREA2_LORA.file}"`)) {
       throw new Error("Krea2 模板的下载格不是 HerRAW 接线版（LORA_NAME 应为 HerRAW 文件）");
@@ -383,8 +440,14 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
     }
   }
 
-  // PROMPT：整段赋值换成 base64 解码行，原始提示词绝不进带引号的字面量
-  const promptB64 = utf8ToBase64(prompt);
+  // PROMPT：整段赋值换成 base64 解码行，原始提示词绝不进带引号的字面量。
+  // MOSS 选中 Blender3D 时，提示词里没有 @blender 就在末尾追加整串触发词
+  //（用户 2026-11-15 要求，一个都不能丢；已经有 @blender 就什么都不加）。
+  let effectivePrompt = String(prompt);
+  if (model === "moss" && mossKeys.includes("blender3d") && !effectivePrompt.includes("@blender")) {
+    effectivePrompt = `${effectivePrompt}, ${MOSS_BLENDER3D_TRIGGER}`;
+  }
+  const promptB64 = utf8ToBase64(effectivePrompt);
   let promptHits = 0;
   run = run.replace(PROMPT_ASSIGN_RE, () => {
     promptHits += 1;
@@ -418,7 +481,7 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
   if (model === "moss") {
     run = replaceOnce(
       run,
-      '{"width": 1696, "height": 2112, "batch_size": 1}',
+      '{"width": 1024, "height": 1536, "batch_size": 1}',
       `{"width": ${baseW}, "height": ${baseH}, "batch_size": 1}`,
       "MOSS latent 尺寸（SeedVR 底图）",
     );
@@ -540,7 +603,7 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
   const patchedRun = cellText(parsed.cells[4]);
   const m = /b64decode\("([A-Za-z0-9+/=]+)"\)/.exec(patchedRun);
   if (!m) throw new Error("改好的 notebook 里找不到 base64 提示词载荷");
-  if (base64ToUtf8(m[1]) !== prompt) {
+  if (base64ToUtf8(m[1]) !== effectivePrompt) {
     throw new Error("提示词往返校验失败：解码结果与原提示词不一致");
   }
   return { text, notebook: parsed };

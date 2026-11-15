@@ -8,11 +8,12 @@ import { Directory, Filesystem } from "@capacitor/filesystem";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { Share } from "@capacitor/share";
 import {
+  DEFAULT_MOSS_LORA_KEYS,
   DEFAULT_ZIMAGE_LORA_KEYS,
   KREA2_LORA,
   MODEL_LABELS,
   MODEL_NAMES,
-  MOSS_LORA,
+  MOSS_LORAS,
   RATIO_KEYS,
   RATIO_LABELS,
   ZIMAGE_LORAS,
@@ -244,19 +245,25 @@ const toastEl = $("toast");
 let selectedModel = "moss";
 let selectedRatio = "auto";
 // LoRA 选择（按模型记，切换模型回来还留着上次的选择）：
-// MOSS/Krea2 是开关（默认带），Z-Image 是三个复选（默认全带）。
+// MOSS 是两个复选（默认只带观澜，Blender3D 默认不勾），Krea2 一个开关（默认带），
+// Z-Image 是三个复选（默认全带）。
 const loraState = {
-  moss: true,
+  moss: [...DEFAULT_MOSS_LORA_KEYS],
   krea2: true,
   zimage: [...DEFAULT_ZIMAGE_LORA_KEYS],
 };
 
-/** 按当前模型渲染 LoRA 选择区：MOSS/Krea2 一个开关，Z-Image 三个复选，Qwen 不显示。 */
+/** 按当前模型渲染 LoRA 选择区：MOSS 两个复选，Krea2 一个开关，Z-Image 三个复选，Qwen 不显示。 */
 function renderLoraBox() {
   const box = $("lora-box");
   if (!box) return;
   if (selectedModel === "moss") {
-    box.innerHTML = `<label class="lora-row"><input type="checkbox" data-lora="moss" ${loraState.moss ? "checked" : ""} /> ${MOSS_LORA.label}</label>`;
+    box.innerHTML =
+      `<span class="lora-title">LoRA（可多选，全不选就是不挂）</span>` +
+      MOSS_LORAS.map(
+        (l) =>
+          `<label class="lora-row"><input type="checkbox" data-lora-key="${l.key}" ${loraState.moss.includes(l.key) ? "checked" : ""} /> ${l.switchLabel}</label>`,
+      ).join("");
   } else if (selectedModel === "krea2") {
     box.innerHTML = `<label class="lora-row"><input type="checkbox" data-lora="krea2" ${loraState.krea2 ? "checked" : ""} /> ${KREA2_LORA.label}</label>`;
   } else if (selectedModel === "zimage") {
@@ -277,9 +284,10 @@ function renderLoraBox() {
   box.querySelectorAll("input[data-lora-key]").forEach((input) => {
     input.addEventListener("change", () => {
       const key = input.dataset.loraKey;
-      loraState.zimage = input.checked
-        ? [...new Set([...loraState.zimage, key])]
-        : loraState.zimage.filter((k) => k !== key);
+      const listKey = selectedModel === "moss" ? "moss" : "zimage";
+      loraState[listKey] = input.checked
+        ? [...new Set([...loraState[listKey], key])]
+        : loraState[listKey].filter((k) => k !== key);
     });
   });
 }
@@ -815,8 +823,8 @@ submitBtn.addEventListener("click", async () => {
       model: selectedModel,
       prompt,
       ratioKey: selectedRatio,
-      useLora: selectedModel === "moss" ? loraState.moss : selectedModel === "krea2" ? loraState.krea2 : undefined,
-      loraKeys: selectedModel === "zimage" ? [...loraState.zimage] : undefined,
+      useLora: selectedModel === "krea2" ? loraState.krea2 : undefined,
+      loraKeys: selectedModel === "zimage" ? [...loraState.zimage] : selectedModel === "moss" ? [...loraState.moss] : undefined,
     });
     promptEl.value = "";
     $("prompt-count").textContent = `0 / ${MAX_PROMPT}`;
