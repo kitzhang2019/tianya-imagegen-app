@@ -91,8 +91,10 @@ app.innerHTML = `
           <span class="select-chev">▾</span>
         </div>
       </div>
-      <div id="lora-box" class="lora-box"></div>
-      <div id="upscale-box" class="lora-box"></div>
+      <div class="options-grid">
+        <div id="lora-box" class="lora-box"></div>
+        <div id="upscale-box" class="lora-box"></div>
+      </div>
       <button id="btn-submit" class="primary-btn">开始生成</button>
       <p id="form-error" class="error" hidden></p>
     </div>
@@ -283,13 +285,13 @@ function renderLoraBox() {
           `<label class="lora-row"><input type="checkbox" data-lora-key="${l.key}" ${loraState.moss.includes(l.key) ? "checked" : ""} /> ${l.switchLabel}</label>`,
       ).join("");
   } else if (selectedModel === "krea2") {
-    box.innerHTML = `<label class="lora-row"><input type="checkbox" data-lora="krea2" ${loraState.krea2 ? "checked" : ""} /> ${KREA2_LORA.label}</label>`;
+    box.innerHTML = `<label class="lora-row"><input type="checkbox" data-lora="krea2" ${loraState.krea2 ? "checked" : ""} /> ${KREA2_LORA.switchLabel}</label>`;
   } else if (selectedModel === "zimage") {
     box.innerHTML =
       `<span class="lora-title">LoRA（可多选，全不选就是不挂）</span>` +
       ZIMAGE_LORAS.map(
         (l) =>
-          `<label class="lora-row"><input type="checkbox" data-lora-key="${l.key}" ${loraState.zimage.includes(l.key) ? "checked" : ""} /> ${l.label.replace(/ (\d)/, " LoRA $1")}</label>`,
+          `<label class="lora-row"><input type="checkbox" data-lora-key="${l.key}" ${loraState.zimage.includes(l.key) ? "checked" : ""} /> ${l.label}</label>`,
       ).join("");
   } else {
     box.innerHTML = "";

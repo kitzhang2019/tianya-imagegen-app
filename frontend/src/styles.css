@@ -252,12 +252,32 @@ textarea {
   line-height: 1.55;
 }
 
-/* 点开选择的选择框（原生 select，iOS 上点开是系统滚轮） */
+/* 点开选择的选择框（原生 select，iOS 上点开是系统滚轮）：紧凑尺寸，
+ * 重点是框高收下来（36px，之前约 45px），内边距与字号配合收紧。 */
 .select-row {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 14px;
+  margin-top: 10px;
+}
+
+/* LoRA + 超分选择区：一行两个的两列网格（Z-Image 3 个 LoRA + 超分共 4 项排两行；
+ * MOSS 2 个 LoRA + 超分；Krea2 1 个 LoRA + 超分；Qwen 只有超分）。
+ * 两个盒子 display: contents，里面的开关直接当网格项排，盒子自身的
+ * margin-top 不再生效——原来 LoRA 与超分之间那块空白就是两个盒子叠出来的。 */
+.options-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 14px;
+  margin-top: 12px;
+}
+
+.options-grid .lora-box {
+  display: contents;
+}
+
+.options-grid .lora-title {
+  grid-column: 1 / -1;
 }
 
 /* LoRA 选择区（只在 MOSS / Krea2 / Z-Image 下显示） */
@@ -280,7 +300,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 0;
+  padding: 4px 0;
   font-size: 15px;
   cursor: pointer;
 }
@@ -307,11 +327,12 @@ textarea {
 
 .glass-select {
   width: 100%;
+  height: 36px;
   appearance: none;
   -webkit-appearance: none;
-  font-size: 16px;
-  padding: 12px 34px 12px 14px;
-  border-radius: 14px;
+  font-size: 14px;
+  padding: 0 32px 0 12px;
+  border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.07);
   color: var(--ink);
@@ -325,11 +346,11 @@ textarea {
 
 .select-chev {
   position: absolute;
-  right: 12px;
+  right: 10px;
   top: 50%;
   transform: translateY(-50%);
   color: var(--muted);
-  font-size: 14px;
+  font-size: 12px;
   pointer-events: none;
 }
 

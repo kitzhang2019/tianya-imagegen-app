@@ -165,10 +165,10 @@ export const MOSS_LORA = {
   label: "观澜 LoRA 0.8",
 };
 // MOSS 双 LoRA 注册表（2026-11-15，Blender3D 加入）：顺序固定观澜 → Blender3D。
-// label 是画廊标签；switchLabel 是表单开关上显示的文字（Blender3D 开关只写
-// "Blender3D 1.0"，与任务要求一致）。
+// label 是画廊标签（带“LoRA”二字，不动）；switchLabel 是表单开关上显示的
+// 文字（只写名字和值，不带“LoRA”二字）。
 export const MOSS_LORAS = [
-  { key: "guanlan", file: "KOOK-MOSS-SFT-观澜.safetensors", strength: 0.8, label: "观澜 LoRA 0.8", switchLabel: "观澜 LoRA 0.8" },
+  { key: "guanlan", file: "KOOK-MOSS-SFT-观澜.safetensors", strength: 0.8, label: "观澜 LoRA 0.8", switchLabel: "观澜 0.8" },
   { key: "blender3d", file: "Moss_Blender3D_V2.safetensors", strength: 1.0, dataset: "kitzhang2019/moss-blender3d-lora-v2", label: "Blender3D LoRA 1.0", switchLabel: "Blender3D 1.0" },
 ];
 export const DEFAULT_MOSS_LORA_KEYS = ["guanlan"];
@@ -183,7 +183,8 @@ export const KREA2_LORA = {
   repo: "RunningHubAI/rh-herraw-sensual-v0.2-lora",
   strength: 0.3,
   dataset: "kitzhang2019/herraw-sensual-krea2",
-  label: "HerRAW LoRA 0.3",
+  label: "HerRAW LoRA 0.3", // 画廊标签（带“LoRA”二字，不动）
+  switchLabel: "HerRAW 0.3", // 表单开关上显示的文字（只写名字和值）
 };
 // Krea2 主模型：Ray Artshoot v5 nvfp4（2026-11-15，App 与管理站/磁盘模板同步，
 // 旧 GGUF Q5_K_M 已弃用）。模板从该私有数据集里取模型文件，Krea2 单必挂。
