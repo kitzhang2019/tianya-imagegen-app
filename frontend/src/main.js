@@ -183,6 +183,14 @@ app.innerHTML = `
       <div class="about-row"><span class="about-label">版本</span><span id="app-version">–</span></div>
       <div class="about-row"><span class="about-label">GitHub</span><a id="github-link" class="external-link" href="https://github.com/kitzhang2019/tianya-imagegen-app" target="_blank" rel="noopener">https://github.com/kitzhang2019/tianya-imagegen-app</a></div>
     </div>
+    <!-- 出图提醒：不锁，打开设置页直接就能看见 -->
+    <div id="settings-notify" class="card glass settings-about">
+      <label class="notify-row" for="set-notify-on-done">
+        <span>出图完成提醒（震动+提示音）</span>
+        <input id="set-notify-on-done" type="checkbox" checked />
+      </label>
+      <p class="hint">需在系统设置里允许通知，否则没有提示音；前台完成时仍会震动。</p>
+    </div>
   </section>
 </main>
 
@@ -579,6 +587,8 @@ function lockSettings() {
 }
 
 async function renderSettings() {
+  // 出图提醒开关在不锁的卡片里，锁不锁都要按当前设置显示
+  $("set-notify-on-done").checked = getSettings().notifyOnDone !== false;
   const pw = await getAdminPassword();
   const lockEl = $("settings-lock");
   const firstEl = $("settings-first");
@@ -1097,6 +1107,22 @@ $("btn-save-settings").addEventListener("click", async () => {
     toast("设置已保存");
   } catch (e) {
     toast(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+});
+
+// 出图提醒开关：一点就保存，不用等“保存设置”按钮；打开时重新要一次通知权限
+// （用户之前拒绝过的话，开关开了也不会响，得先在系统里允许）。
+$("set-notify-on-done").addEventListener("change", async (e) => {
+  const on = e.target.checked;
+  try {
+    await saveSettings({ notifyOnDone: on });
+    if (on && Capacitor.isNativePlatform()) {
+      LocalNotifications.requestPermissions().catch(() => {});
+    }
+    toast(on ? "出图完成提醒已开启" : "出图完成提醒已关闭");
+  } catch (err) {
+    toast(`保存失败：${err instanceof Error ? err.message : String(err)}`);
+    e.target.checked = !on;
   }
 });
 

@@ -312,6 +312,23 @@ textarea {
   flex: none;
 }
 
+/* 设置页“出图完成提醒”开关行（不锁的卡片里） */
+.notify-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.notify-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #a855f7;
+  flex: none;
+}
+
 .select-label {
   flex: none;
   width: 42px;

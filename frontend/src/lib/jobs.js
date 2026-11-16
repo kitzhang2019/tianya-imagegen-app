@@ -4,6 +4,7 @@
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { Directory, Filesystem } from "@capacitor/filesystem";
+import { Haptics, NotificationType } from "@capacitor/haptics";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { LiveActivities } from "@ciabosoftwaresolutions/capacitor-live-activities";
 import {
@@ -97,6 +98,7 @@ export const DEFAULT_SETTINGS = {
   kaggleToken: "",
   galleryKey: "",
   galleryUrl: DEFAULT_GALLERY_URL,
+  notifyOnDone: true, // 出图完成提醒（震动+提示音），默认开
 };
 
 export function maskSecret(value) {
@@ -251,11 +253,13 @@ async function saveJobs() {
 }
 
 export async function saveSettings(next) {
+  // 字段按“没传就保留旧值”合并：开关只传 { notifyOnDone } 时不能把账号 Token 清掉
   settings = {
-    kaggleUsername: String(next.kaggleUsername ?? "").trim(),
-    kaggleToken: String(next.kaggleToken ?? "").trim(),
-    galleryKey: String(next.galleryKey ?? "").trim(),
-    galleryUrl: String(next.galleryUrl ?? "").trim() || DEFAULT_GALLERY_URL,
+    kaggleUsername: String(next.kaggleUsername ?? settings.kaggleUsername ?? "").trim(),
+    kaggleToken: String(next.kaggleToken ?? settings.kaggleToken ?? "").trim(),
+    galleryKey: String(next.galleryKey ?? settings.galleryKey ?? "").trim(),
+    galleryUrl: String(next.galleryUrl ?? settings.galleryUrl ?? "").trim() || DEFAULT_GALLERY_URL,
+    notifyOnDone: next.notifyOnDone ?? settings.notifyOnDone ?? true,
   };
   await Preferences.set({ key: PREF_SETTINGS, value: JSON.stringify(settings) });
   return getSettings();
@@ -307,8 +311,10 @@ function updateJob(id, patch) {
   return job;
 }
 
-/** 生成完成/失败后发一条系统通知（App 在前台或后台运行时才触发；被系统挂起后等下次打开 App 轮询到结果时再补发）。 */
-async function notifyJob(job, ok) {
+/** 生成完成/失败后发一条系统通知 + 震动（App 在前台或后台运行时才触发；被系统挂起后等下次打开 App 轮询到结果时再补发）。 */
+export async function notifyJob(job, ok) {
+  // 设置里关了提醒就不发通知也不震动
+  if (!settings.notifyOnDone) return;
   try {
     if (!Capacitor.isNativePlatform()) return;
     const label = MODEL_LABELS[job.model] ?? job.model;
@@ -318,11 +324,28 @@ async function notifyJob(job, ok) {
           id: job.id,
           title: ok ? "出图完成" : "生成失败",
           body: ok ? `${label} 已出图，点开查看` : `${label} 生成失败，点开查看原因`,
+          // iOS 不填 sound 就不响铃（类型定义写明：不填则 Android 响默认音、iOS 无声），
+          // 这就是之前“完成时没声音”的根因。sound: "default" = 系统默认提示音。
+          sound: "default",
         },
       ],
     });
   } catch {
     // 通知发不出去不影响任务本身
+  }
+  // 前台完成时通知横幅不一定引起注意，再补一次触觉反馈；后台时靠通知本身的震动。
+  // 与通知分开 try/catch：通知失败了震动照样试。
+  try {
+    if (!Capacitor.isNativePlatform()) return;
+    // 注意：type 必须用 NotificationType 枚举的大写值（"SUCCESS"/"ERROR"），
+    // iOS/Android 原生代码只认大写，小写 "error" 会被当成 success 震。
+    await Haptics.notification({ type: ok ? NotificationType.Success : NotificationType.Error });
+  } catch {
+    try {
+      await Haptics.vibrate();
+    } catch {
+      // 震动也不支持就不震，不影响任务
+    }
   }
 }
 

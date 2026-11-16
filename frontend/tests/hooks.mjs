@@ -4,6 +4,7 @@ const STUBS = {
   "@capacitor/core": "./stubs/capacitor-core.mjs",
   "@capacitor/preferences": "./stubs/capacitor-preferences.mjs",
   "@capacitor/filesystem": "./stubs/capacitor-filesystem.mjs",
+  "@capacitor/haptics": "./stubs/capacitor-haptics.mjs",
   "@capacitor/local-notifications": "./stubs/capacitor-local-notifications.mjs",
   "@ciabosoftwaresolutions/capacitor-live-activities": "./stubs/live-activities.mjs",
 };
