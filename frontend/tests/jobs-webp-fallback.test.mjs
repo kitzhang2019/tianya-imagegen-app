@@ -96,5 +96,7 @@ test("finishJob：PNG 下不下来时改下同名 WebP 当主图，任务完成�
   const job = getJobs()[0];
   assert.equal(job.status, "done");
   assert.equal(job.imageFileName, "moss_dash_4.webp");
-  assert.equal(job.webpFileName, null);
+  // WebP 优先（2026-11-16）：主图就是 WebP 时 webpFileName 也指向它（画廊推送
+  // 优先推 WebP，之前老流程里这里是 null、推送会拿错 contentType）。
+  assert.equal(job.webpFileName, "moss_dash_4.webp");
 });

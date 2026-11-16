@@ -1084,6 +1084,30 @@ async function probeOutput(job, client, budgetMs = PROBE_BUDGET_MS) {
   return null;
 }
 
+/** 后台下 PNG 原图：WebP 先行的任务完成后，后台把 12MB PNG 下回来存好，
+ *  再把主图换成 PNG（原图）。下不到就留着 WebP 当主图，不报错、不打扰用户。
+ *  任务已被删、或状态不再是 done 时不再写回。 */
+async function downloadPngInBackground(job, pngUrl, pngName) {
+  try {
+    const client = makeClient();
+    const bytes = await client.downloadPng(pngUrl);
+    await Filesystem.writeFile({
+      path: `images/${pngName}`,
+      data: bytesToBase64(bytes),
+      directory: Directory.Data,
+      recursive: true,
+    });
+    const uri = await Filesystem.getUri({ path: `images/${pngName}`, directory: Directory.Data });
+    blobUrls.set(job.id, URL.createObjectURL(new Blob([bytes], { type: "image/png" })));
+    const current = jobs.find((j) => j.id === job.id);
+    if (!current || current.status !== "done") return;
+    updateJob(job.id, { imageFileName: pngName, imagePath: uri.uri });
+    await saveJobs();
+  } catch {
+    // PNG 下不到：留着 WebP 当主图，不报错
+  }
+}
+
 /** 下载回存 + 保存文件 + 画廊推送。 */
 async function finishJob(job, url = null) {
   if (busyJobs.has(job.id)) return;
@@ -1128,16 +1152,63 @@ async function finishJob(job, url = null) {
       downloadUrl = found.url;
     }
 
-    // 先下 PNG；PNG 下不下来（比如超过 20MB 上限被拒）就改下同名 WebP 兜底，
+    // WebP 优先（2026-11-16）：先下 1.25MB 的 WebP，存好就先完成任务、让图显示出来；
+    // 12MB 的 PNG 放后台慢慢下，存好后再把主图换成 PNG（原图）。这样“下载回存”这一步
+    // 从几分钟压到十几秒。WebP 下不到就走老路（先下 PNG 再下 WebP）。
+    const pngName = job.imageFileName;
+    const webpName = String(pngName).replace(/\.png$/i, ".webp");
+    let webpUrl = null;
+    try {
+      const foundWebp = await client.findOutputFile(job.kaggleRef, webpName, { budgetMs: FIND_BUDGET_MS });
+      if (foundWebp.ok && foundWebp.url) webpUrl = foundWebp.url;
+    } catch {
+      webpUrl = null;
+    }
+    if (webpUrl) {
+      try {
+        const webpBytes = await client.downloadWebp(webpUrl);
+        await Filesystem.writeFile({
+          path: `images/${webpName}`,
+          data: bytesToBase64(webpBytes),
+          directory: Directory.Data,
+          recursive: true,
+        });
+        const webpUri = await Filesystem.getUri({ path: `images/${webpName}`, directory: Directory.Data });
+        blobUrls.set(job.id, URL.createObjectURL(new Blob([webpBytes], { type: "image/webp" })));
+        // 缩略图用 WebP 字节建（此时 imageFileName 还是 PNG 名，缩略图文件名
+        // 按 PNG 名取，PNG 到了也不用重建）。
+        const doneJob = jobs.find((j) => j.id === job.id) || job;
+        await buildThumbnail(doneJob, webpBytes, "image/webp");
+        updateJob(job.id, {
+          status: "done",
+          stage: "done",
+          stageDetail: "已完成，图片已保存",
+          finishedAt: Date.now(),
+          imageFileName: webpName,
+          imagePath: webpUri.uri,
+          webpFileName: webpName,
+          downloadStartedAt: null,
+        });
+        await saveJobs();
+        notifyJob(job, true);
+        endLiveActivity(job, true);
+        // PNG 放后台下，存好后把主图换成 PNG 原图；下不到就留着 WebP 当主图。
+        downloadPngInBackground(job, downloadUrl, pngName).catch(() => {});
+        return;
+      } catch {
+        // WebP 下不到：走老路（先下 PNG）
+      }
+    }
+
+    // 老路：先下 PNG；PNG 下不下来（比如超过 20MB 上限被拒）就改下同名 WebP 兜底，
     // 下到了就用 WebP 当主图继续完成——整单不再因为 PNG 太大而死。
     // WebP 也下不到才抛 PNG 那边的原错。
     let bytes;
     let contentType = "image/png";
-    let finalFileName = job.imageFileName;
+    let finalFileName = pngName;
     try {
       bytes = await client.downloadPng(downloadUrl);
     } catch (pngErr) {
-      const webpName = String(job.imageFileName).replace(/\.png$/i, ".webp");
       let foundWebp = null;
       try {
         foundWebp = await client.findOutputFile(job.kaggleRef, webpName, { budgetMs: FIND_BUDGET_MS });
@@ -1167,7 +1238,6 @@ async function finishJob(job, url = null) {
     let webpFileName = null;
     if (contentType === "image/png") {
       try {
-        const webpName = String(job.imageFileName).replace(/\.png$/i, ".webp");
         const foundWebp = await client.findOutputFile(job.kaggleRef, webpName, { budgetMs: FIND_BUDGET_MS });
         if (foundWebp.ok && foundWebp.url) {
           const webpBytes = await client.downloadWebp(foundWebp.url);
