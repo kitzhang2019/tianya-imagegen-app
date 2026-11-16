@@ -13,6 +13,7 @@ import {
   normalizeUseUpscale,
   outputSizeForJob,
   patchNotebook,
+  ratioOptionLabel,
   resolveSize,
   upscalerLabelForJob,
   upscaleOffSize,
@@ -215,4 +216,14 @@ test("MOSS 尺寸表（2026-11-16，只改底图 1280）：最终短边 2560、�
   }
   assert.deepEqual(resolveSize("moss", "r2x3v"), { key: "r2x3v", width: 2560, height: 3840, label: "2:3竖" });
   assert.deepEqual(resolveSize("moss", "r9x16v"), { key: "r9x16v", width: 2560, height: 4544, label: "9:16竖" });
+});
+
+test("ratioOptionLabel：比例选项后面括号里写实际像素尺寸（2026-11-16 用户要求）", () => {
+  assert.equal(ratioOptionLabel("moss", "r2x3v"), "2:3竖 (2560×3840)");
+  assert.equal(ratioOptionLabel("moss", "r9x16v"), "9:16竖 (2560×4544)");
+  assert.equal(ratioOptionLabel("moss", "r1x1"), "1:1 (2560×2560)");
+  // 非 MOSS 模型走 QWEN_SIZES 表，尺寸跟着换
+  assert.equal(ratioOptionLabel("qwen", "r2x3v"), "2:3竖 (1760×2624)");
+  assert.equal(ratioOptionLabel("krea2", "r2x3v"), "2:3竖 (1760×2624)");
+  assert.equal(ratioOptionLabel("zimage", "r2x3v"), "2:3竖 (1760×2624)");
 });

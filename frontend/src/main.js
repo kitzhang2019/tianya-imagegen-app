@@ -17,6 +17,7 @@ import {
   RATIO_KEYS,
   RATIO_LABELS,
   ZIMAGE_LORAS,
+  ratioOptionLabel,
 } from "./lib/notebook.js";
 import {
   STAGE_LABELS,
@@ -352,7 +353,7 @@ function populateSelects() {
     `<option value="auto"${selectedRatio === "auto" ? " selected" : ""}>自动</option>` +
     RATIO_KEYS.map(
       (k) =>
-        `<option value="${k}"${k === selectedRatio ? " selected" : ""}>${RATIO_LABELS[k]}</option>`,
+        `<option value="${k}"${k === selectedRatio ? " selected" : ""}>${ratioOptionLabel(selectedModel, k)}</option>`,
     ).join("");
 }
 
@@ -821,6 +822,7 @@ promptEl.addEventListener("input", () => {
 $("model-select").addEventListener("change", (e) => {
   selectedModel = e.target.value;
   renderLoraBox();
+  populateSelects(); // 换模型后比例选项的尺寸也要跟着换表重算
 });
 
 $("ratio-select").addEventListener("change", (e) => {

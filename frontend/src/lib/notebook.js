@@ -121,6 +121,17 @@ export function detectRatioKeyFromPrompt(prompt) {
   return "r3x4v";
 }
 
+/** 比例选项的显示文字：比例名 + 该模型下实际像素尺寸，如 "2:3竖 (2560×3840)"。
+ * 2026-11-16 用户要求：下拉框只写比例名看不出尺寸，括号里要写上多少×多少。
+ * 尺寸按模型取表（MOSS 用 MOSS_SIZES，其余用 QWEN_SIZES）。 */
+export function ratioOptionLabel(model, key) {
+  const table = model === "moss" ? MOSS_SIZES : QWEN_SIZES;
+  const size = table[key];
+  const name = RATIO_LABELS[key] ?? key;
+  if (!size) return name;
+  return `${name} (${size.width}×${size.height})`;
+}
+
 /** 解析最终尺寸：ratioKey 为 "auto" 时从提示词里猜，否则直接查表。 */
 export function resolveSize(model, ratioKey, prompt) {
   const table = model === "moss" ? MOSS_SIZES : QWEN_SIZES;
