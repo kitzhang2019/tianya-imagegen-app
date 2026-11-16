@@ -23,5 +23,5 @@
     "test": "node --import ./tests/register.mjs --test \"tests/*.test.mjs\""
   },
   "type": "module",
-  "version": "1.2.12"
+  "version": "1.2.13"
 }

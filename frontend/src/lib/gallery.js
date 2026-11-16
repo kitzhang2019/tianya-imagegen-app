@@ -29,6 +29,16 @@ export const GALLERY_MODEL_LABELS = {
   zimage: "Z-Image",
 };
 
+// 画廊推送的步数 / CFG / 文本编码 / VAE：与画廊服务端 MODEL_PARAMS 一致
+// （showcase-cloady/server.js 的 MODEL_PARAMS 表，2026-11-16 核对）。
+// 不带这四个字段时画廊详情页只能按时间查表兜底，带上就是实测值。
+export const MODEL_GALLERY_PARAMS = {
+  moss: { steps: 25, cfg: "3.5", text_encoder: "Qwen3.5-9B w4a8", vae: "FLUX.2 small" },
+  qwen: { steps: 25, cfg: "3", text_encoder: "Qwen3-VL 8B int8", vae: "Qwen Image 2.1 VAE" },
+  krea2: { steps: 8, cfg: "1", text_encoder: "Qwen3-VL 4B fp8", vae: "Qwen Image VAE" },
+  zimage: { steps: 8, cfg: "1", text_encoder: "Qwen3-4B FP8", vae: "Flux VAE" },
+};
+
 /**
  * @param {{url:string, key:string, job:{model:string, prompt:string, seed:number, width:number, height:number, createdAt:number}, imageBytes:Uint8Array, fileName:string, contentType?:string}} args
  * @returns {Promise<{ok:boolean, error:string|null}>}
@@ -54,6 +64,14 @@ export async function pushToGallery({ url, key, job, imageBytes, fileName, conte
   // LoRA 标签（与管理站推送格式一致）：挂了就写组合标签，没挂发空，画廊详情页才显示得对。
   if (job.model === "moss" || job.model === "krea2" || job.model === "zimage") {
     fields.lora = loraLabelForJob(job);
+  }
+  // 步数 / CFG / 文本编码 / VAE：按模型取实测值（与画廊服务端 MODEL_PARAMS 一致）。
+  const params = MODEL_GALLERY_PARAMS[job.model];
+  if (params) {
+    fields.steps = String(params.steps);
+    fields.cfg = params.cfg;
+    fields.text_encoder = params.text_encoder;
+    fields.vae = params.vae;
   }
 
   try {

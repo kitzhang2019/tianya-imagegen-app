@@ -47,6 +47,7 @@ const POLL_MS = 20000;
 const VERIFY_WINDOW_MS = 5 * 60 * 1000; // 推送后核实 Kernel 的窗口
 const VERIFY_INTERVAL_MS = 30000;
 const QUEUED_BACKSTOP_MS = 6 * 3600 * 1000; // queued 超过 6 小时 -> 失败
+const RUNNING_BACKSTOP_MS = 2 * 3600 * 1000; // running 超过 2 小时 -> 失败（与管理站生成 2 小时失败线对齐）
 const DOWNLOAD_BACKSTOP_MS = 10 * 60 * 1000; // downloading 重试超过 10 分钟 -> 失败
 const RECONCILE_AFTER_MS = 20 * 60 * 1000; // queued/running 超过 20 分钟就探输出列表
 const QUEUE_ALLOWANCE_MS = 5 * 60 * 1000; // 预估总时长里的排队留量（与 Live Activities 预计完成时间同一口径）
@@ -180,10 +181,10 @@ function thumbFileNameFor(imageFileName) {
   return String(imageFileName || "").replace(/\.png$/i, "-thumb.webp");
 }
 
-/** 用 canvas 把 PNG bytes 转成 WebP 缩略图（最长边 480px），返回 WebP bytes；失败返回 null。 */
-async function makeThumbBytes(pngBytes) {
+/** 用 canvas 把图片 bytes 转成 WebP 缩略图（最长边 480px），返回 WebP bytes；失败返回 null。 */
+async function makeThumbBytes(bytes, contentType = "image/png") {
   try {
-    const blob = new Blob([pngBytes], { type: "image/png" });
+    const blob = new Blob([bytes], { type: contentType });
     const bmp = await createImageBitmap(blob);
     const scale = Math.min(1, THUMB_MAX / Math.max(bmp.width, bmp.height));
     const w = Math.max(1, Math.round(bmp.width * scale));
@@ -201,16 +202,18 @@ async function makeThumbBytes(pngBytes) {
   }
 }
 
-/** 给一条已完成任务生成并保存 WebP 缩略图（失败不抛错，只返回 false）。 */
-async function buildThumbnail(job, pngBytes) {
+/** 给一条已完成任务生成并保存 WebP 缩略图（失败不抛错，只返回 false）。
+ * contentType 不传时按 imageFileName 后缀判断（.webp 就是 image/webp），
+ * 别把 WebP 字节硬标成 image/png。 */
+async function buildThumbnail(job, bytes, contentType) {
   if (!job || !job.imageFileName) return false;
   try {
-    let bytes = pngBytes;
     if (!bytes) {
       const { data } = await Filesystem.readFile({ path: `images/${job.imageFileName}`, directory: Directory.Data });
       bytes = base64ToBytes(data);
     }
-    const thumb = await makeThumbBytes(bytes);
+    const type = contentType || (/\.webp$/i.test(job.imageFileName) ? "image/webp" : "image/png");
+    const thumb = await makeThumbBytes(bytes, type);
     if (!thumb) return false;
     const thumbFileName = thumbFileNameFor(job.imageFileName);
     await Filesystem.writeFile({
@@ -239,9 +242,12 @@ export async function ensureThumbnails() {
 }
 
 async function saveJobs() {
+  // 截掉超出的旧任务时顺带删文件（只截记录不删文件会在手机上慢慢泄漏存储）。
+  const dropped = jobs.length > MAX_JOBS ? jobs.slice(MAX_JOBS) : [];
   jobs = jobs.slice(0, MAX_JOBS);
   await Preferences.set({ key: PREF_JOBS, value: JSON.stringify(jobs) });
   emit();
+  for (const old of dropped) await deleteJobFiles(old);
 }
 
 export async function saveSettings(next) {
@@ -571,9 +577,11 @@ export function getRegenPair(job) {
 // 生成耗时估算（毫秒）：按参考尺寸实测时间，再按像素数缩放。只是估算，环不会卡死在 88% 以内。
 const GEN_BASE_MS = {
   moss: { ms: 46 * 60 * 1000, px: 2560 * 3840 }, // 2026-11-16：底图改 1280 后，2:3 实测约 46 分钟（测试单 moss-test2-1280base-20261116b，推送到完成）
-  qwen: { ms: 75 * 1000, px: 1024 * 1024 },
-  krea2: { ms: 120 * 1000, px: 1024 * 1024 },
-  zimage: { ms: 60 * 1000, px: 1024 * 1024 },
+  // 2026-11-15 站里实测生成段（2048×3072 即 6.0MP）：Qwen 约 16 分钟、Krea2 约 13 分钟、Z-Image 约 21 分钟。
+  // 旧值（75/120/60 秒每 1MP）只有实测的约 1/3 到 1/2，预估严重偏短。
+  qwen: { ms: 16 * 60 * 1000, px: 2048 * 3072 },
+  krea2: { ms: 13 * 60 * 1000, px: 2048 * 3072 },
+  zimage: { ms: 21 * 60 * 1000, px: 2048 * 3072 },
 };
 
 function estimateGenerateMs(model, width, height) {
@@ -741,31 +749,24 @@ export async function pushJobToGallery(id) {
   return push;
 }
 
+/** 删一条任务对应的本机文件（主图 + WebP + 缩略图），删不掉不抛错。 */
+async function deleteJobFiles(job) {
+  if (!job) return;
+  for (const name of [job.imageFileName, job.webpFileName, job.thumbFileName]) {
+    if (!name) continue;
+    try {
+      await Filesystem.deleteFile({ path: `images/${name}`, directory: Directory.Data });
+    } catch {
+      // 文件删不掉不影响
+    }
+  }
+}
+
 export async function deleteJob(id) {
   const job = jobs.find((j) => j.id === id);
   jobs = jobs.filter((j) => j.id !== id);
   await saveJobs();
-  if (job?.imageFileName) {
-    try {
-      await Filesystem.deleteFile({ path: `images/${job.imageFileName}`, directory: Directory.Data });
-    } catch {
-      // 文件删不掉不影响记录删除
-    }
-    if (job.webpFileName) {
-      try {
-        await Filesystem.deleteFile({ path: `images/${job.webpFileName}`, directory: Directory.Data });
-      } catch {
-        // WebP 删不掉不影响
-      }
-    }
-    if (job.thumbFileName) {
-      try {
-        await Filesystem.deleteFile({ path: `images/${job.thumbFileName}`, directory: Directory.Data });
-      } catch {
-        // 缩略图删不掉不影响
-      }
-    }
-  }
+  await deleteJobFiles(job);
   const url = blobUrls.get(id);
   if (url) {
     URL.revokeObjectURL(url);
@@ -1104,48 +1105,72 @@ async function finishJob(job, url = null) {
       downloadUrl = found.url;
     }
 
-    const bytes = await client.downloadPng(downloadUrl);
+    // 先下 PNG；PNG 下不下来（比如超过 20MB 上限被拒）就改下同名 WebP 兜底，
+    // 下到了就用 WebP 当主图继续完成——整单不再因为 PNG 太大而死。
+    // WebP 也下不到才抛 PNG 那边的原错。
+    let bytes;
+    let contentType = "image/png";
+    let finalFileName = job.imageFileName;
+    try {
+      bytes = await client.downloadPng(downloadUrl);
+    } catch (pngErr) {
+      const webpName = String(job.imageFileName).replace(/\.png$/i, ".webp");
+      let foundWebp = null;
+      try {
+        foundWebp = await client.findOutputFile(job.kaggleRef, webpName, { budgetMs: FIND_BUDGET_MS });
+      } catch {
+        foundWebp = null;
+      }
+      if (!foundWebp?.ok || !foundWebp.url) throw pngErr;
+      bytes = await client.downloadWebp(foundWebp.url);
+      contentType = "image/webp";
+      finalFileName = webpName;
+    }
     const base64 = bytesToBase64(bytes);
     await Filesystem.writeFile({
-      path: `images/${job.imageFileName}`,
+      path: `images/${finalFileName}`,
       data: base64,
       directory: Directory.Data,
       recursive: true,
     });
-    const uri = await Filesystem.getUri({ path: `images/${job.imageFileName}`, directory: Directory.Data });
-    blobUrls.set(job.id, URL.createObjectURL(new Blob([bytes], { type: "image/png" })));
+    const uri = await Filesystem.getUri({ path: `images/${finalFileName}`, directory: Directory.Data });
+    blobUrls.set(job.id, URL.createObjectURL(new Blob([bytes], { type: contentType })));
 
     // 顺带把同名 WebP 也下回来（画廊推送改推 WebP 用）：kernel 同时产 .png
     // 与 .webp 两份，2560×3840 的 PNG 约 12MB 超过画廊 10MB 上传上限
     // （实测 12MB 推画廊回 502），WebP 只有约 1.25MB，推得动。
     // WebP 下不到不影响出图（PNG 已存好），推送时没 WebP 就回退推 PNG。
+    // 主图本身就是 WebP 时跳过（不用再下一次）。
     let webpFileName = null;
-    try {
-      const webpName = String(job.imageFileName).replace(/\.png$/i, ".webp");
-      const foundWebp = await client.findOutputFile(job.kaggleRef, webpName, { budgetMs: FIND_BUDGET_MS });
-      if (foundWebp.ok && foundWebp.url) {
-        const webpBytes = await client.downloadWebp(foundWebp.url);
-        await Filesystem.writeFile({
-          path: `images/${webpName}`,
-          data: bytesToBase64(webpBytes),
-          directory: Directory.Data,
-          recursive: true,
-        });
-        webpFileName = webpName;
+    if (contentType === "image/png") {
+      try {
+        const webpName = String(job.imageFileName).replace(/\.png$/i, ".webp");
+        const foundWebp = await client.findOutputFile(job.kaggleRef, webpName, { budgetMs: FIND_BUDGET_MS });
+        if (foundWebp.ok && foundWebp.url) {
+          const webpBytes = await client.downloadWebp(foundWebp.url);
+          await Filesystem.writeFile({
+            path: `images/${webpName}`,
+            data: bytesToBase64(webpBytes),
+            directory: Directory.Data,
+            recursive: true,
+          });
+          webpFileName = webpName;
+        }
+      } catch {
+        webpFileName = null;
       }
-    } catch {
-      webpFileName = null;
     }
 
     // 图库网格用的 WebP 缩略图（失败不影响出图）
     const doneJob = jobs.find((j) => j.id === job.id) || job;
-    await buildThumbnail(doneJob, bytes);
+    await buildThumbnail(doneJob, bytes, contentType);
 
     updateJob(job.id, {
       status: "done",
       stage: "done",
       stageDetail: "已完成，图片已保存",
       finishedAt: Date.now(),
+      imageFileName: finalFileName,
       imagePath: uri.uri,
       webpFileName,
       downloadStartedAt: null,
@@ -1250,6 +1275,12 @@ async function tick() {
         await failJob(job, "云端排队超过 6 小时仍没开始，已自动结束。可以点「重新提交」再试。");
         continue;
       }
+      // 生成中超过 2 小时：kernel 一直回 running 也不能无限等（与管理站生成
+      // 2 小时失败线对齐）。stageStartedAt 是进入 running 阶段的时间。
+      if (job.status === "running" && now - (job.stageStartedAt || job.createdAt) > RUNNING_BACKSTOP_MS) {
+        await failJob(job, "生成超过 2 小时未完成，已自动结束。可以点「重新提交」再试。");
+        continue;
+      }
       const client = makeClient();
       const st = await client.kernelStatus(job.kaggleRef);
       if (!jobs.some((j) => j.id === job.id)) continue;
@@ -1344,6 +1375,11 @@ export function stopPolling() {
 /** 仅测试用：手动跑一轮轮询（真机上由 startPolling 的定时器驱动）。 */
 export function __tickForTest() {
   return tick();
+}
+
+/** 测试专用：直接调 saveJobs（触发 50 条截断 + 删文件）。 */
+export function __saveJobsForTest() {
+  return saveJobs();
 }
 
 /** 应用打开时恢复：未终态的任务继续轮询；中断在准备阶段的按规则处理。 */

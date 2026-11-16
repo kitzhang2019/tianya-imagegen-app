@@ -24,6 +24,10 @@ export const MODEL_NAMES = ["moss", "qwen", "krea2", "zimage"];
 // 16 整除，latent 要求即满足）。2:3 为 2560×3840，与 1280 底图测试单
 // （moss-test2-1280base-20261116b）一致。旧表底图只有 712×1264 /
 // 848×1264，比管理站的 1024×1536 小，出图偏 3D，见 2026-11-16 对比。
+// 风险（2026-11-16）：r21x9（5984×2560，15.3MP）等最宽几档的 PNG 按比例
+// 估算约 18.8MB，离 20MB 回存上限只差约 1MB；且 SeedVR 7B 在 T4 上实测过的
+// 最大输出是 2560×3840（9.8MP），15MP 超分没实测过。PNG 下不下来时会走
+// WebP 兜底（finishJob），整单不再死，但大比例出图仍须留意。
 export const MOSS_SIZES = {
   r16x9h: { width: 4544, height: 2560 },
   r9x16v: { width: 2560, height: 4544 },
@@ -39,20 +43,25 @@ export const MOSS_SIZES = {
   r4x5v: { width: 2560, height: 3200 },
 };
 
-// 2.1x 尺寸表（Qwen / Krea2 / Z-Image 共用）
+// Qwen / Krea2 / Z-Image 共用尺寸表（2026-11-16，与管理站对齐）。
+// 最终尺寸 = 底图 × 2（SeedVR 2x），底图短边 1024、最终短边 2048；
+// 长边按方向比例、取到 32 的倍数（最终边长能被 32 整除，则底图边长能被
+// 16 整除，latent 要求即满足）。2:3 为 2048×3072（底图 1024×1536）。
+// 旧表 2:3 最终 1760×2624（底图 880×1312），比管理站的 1024×1536 小
+// 27%，和当初 MOSS 底图小导致偏 3D 是同一毛病，见 2026-11-16 对比。
 export const QWEN_SIZES = {
-  r16x9h: { width: 2880, height: 1600 },
-  r9x16v: { width: 1600, height: 2880 },
-  r4x3h: { width: 2496, height: 1888 },
-  r3x4v: { width: 1888, height: 2496 },
-  r1x1: { width: 2144, height: 2144 },
-  r3x2h: { width: 2624, height: 1760 },
-  r2x3v: { width: 1760, height: 2624 },
-  r21x9: { width: 3296, height: 1408 },
-  r2x1h: { width: 3296, height: 1376 },
-  r1x2v: { width: 1376, height: 3296 },
-  r5x4h: { width: 2400, height: 1920 },
-  r4x5v: { width: 1920, height: 2400 },
+  r16x9h: { width: 3680, height: 2048 },
+  r9x16v: { width: 2048, height: 3680 },
+  r4x3h: { width: 2720, height: 2048 },
+  r3x4v: { width: 2048, height: 2720 },
+  r1x1: { width: 2048, height: 2048 },
+  r3x2h: { width: 3072, height: 2048 },
+  r2x3v: { width: 2048, height: 3072 },
+  r21x9: { width: 4800, height: 2048 },
+  r2x1h: { width: 4928, height: 2048 },
+  r1x2v: { width: 2048, height: 4928 },
+  r5x4h: { width: 2560, height: 2048 },
+  r4x5v: { width: 2048, height: 2560 },
 };
 
 export const RATIO_KEYS = [
@@ -216,7 +225,8 @@ export const ZIMAGE_MAIN_DATASET = "kitzhang2019/pornmaster-zimage-v35-fp8";
 export const SEEDVR_DATASET = "kitzhang2019/seedvr2-7b";
 
 // --- 超分开关（2026-11-15，用户定：默认开）---
-// 开：底图 1024×1536 + SeedVR 7B → 最终尺寸；关：跳过 SeedVR 段，底图直接当
+// 开：MOSS 底图 1280×1920、Qwen/Krea2/Z-Image 底图短边 1024（2:3 为
+// 1024×1536），再 + SeedVR 7B → 最终尺寸；关：跳过 SeedVR 段，底图直接当
 // 成品出 WebP，不挂 seedvr2-7b 数据集。老任务没有 useUpscale 字段时按开处理。
 export function normalizeUseUpscale(value) {
   return value !== false;
@@ -263,9 +273,9 @@ export function collectDatasetSources({ model, loraKeys, useLora, useUpscale, mo
   return sources;
 }
 export const ZIMAGE_LORAS = [
-  { key: "herraw", file: "HerRAW_zimage_v0.2_c1-st5000.safetensors", strength: 0.8, dataset: "kitzhang2019/herraw-zimage-v02", label: "HerRAW 0.8" },
-  { key: "yaoguang", file: "Kook_Zimage_Yaoguang.safetensors", strength: 1.0, dataset: "kitzhang2019/kook-zimage-yaoguang2", label: "瑶光 1.0" },
-  { key: "ostris", file: "zimage_turbo_training_adapter_v2.safetensors", strength: 1.0, dataset: "kitzhang2019/ostris-zimage-turbo-adapter-v2", label: "ostris 1.0" },
+  { key: "herraw", file: "HerRAW_zimage_v0.2_c1-st5000.safetensors", strength: 0.8, dataset: "kitzhang2019/herraw-zimage-v02", label: "HerRAW 0.8", switchLabel: "HerRAW 0.8" },
+  { key: "yaoguang", file: "Kook_Zimage_Yaoguang.safetensors", strength: 1.0, dataset: "kitzhang2019/kook-zimage-yaoguang2", label: "瑶光 1.0", switchLabel: "瑶光 1.0" },
+  { key: "ostris", file: "zimage_turbo_training_adapter_v2.safetensors", strength: 1.0, dataset: "kitzhang2019/ostris-zimage-turbo-adapter-v2", label: "ostris 1.0", switchLabel: "ostris 1.0" },
 ];
 export const DEFAULT_ZIMAGE_LORA_KEYS = ZIMAGE_LORAS.map((l) => l.key);
 
@@ -633,7 +643,7 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
   } else if (model === "qwen") {
     run = replaceOnce(
       run,
-      '{"width": 1024, "height": 1024, "batch_size": 1}',
+      '{"width": 1024, "height": 1536, "batch_size": 1}',
       `{"width": ${baseW}, "height": ${baseH}, "batch_size": 1}`,
       "Qwen latent 尺寸（SeedVR 底图）",
     );
@@ -651,7 +661,7 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
   } else if (model === "krea2") {
     run = replaceOnce(
       run,
-      '{"width": 1024, "height": 1024, "batch_size": 1}',
+      '{"width": 1024, "height": 1536, "batch_size": 1}',
       `{"width": ${baseW}, "height": ${baseH}, "batch_size": 1}`,
       "Krea2 latent 尺寸（SeedVR 底图）",
     );
@@ -667,7 +677,7 @@ export function patchNotebook(template, { model, prompt, width, height, seed, jo
     }
   } else if (model === "zimage") {
     run = replaceOnce(run, "WIDTH = 1024", `WIDTH = ${baseW}`, "Z-Image 宽度（SeedVR 底图）");
-    run = replaceOnce(run, "HEIGHT = 1024", `HEIGHT = ${baseH}`, "Z-Image 高度（SeedVR 底图）");
+    run = replaceOnce(run, "HEIGHT = 1536", `HEIGHT = ${baseH}`, "Z-Image 高度（SeedVR 底图）");
     // 种子：KSampler 与 SeedVR 放大节点各有一个 "seed": 42，开超分时两个都换
     // 成任务种子；关超分时 SeedVR 节点已被切掉，只剩 KSampler 的 1 个。
     {

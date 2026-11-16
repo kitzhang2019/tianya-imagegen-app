@@ -134,10 +134,11 @@ test("括号备注文案：四种结论 + 北京时间", () => {
 test("isQueueOverdue：只看排队阶段 + 进排队超 30 分钟（绝对时长）", () => {
   const now = Date.now();
   assert.equal(QUEUE_CHECK_AFTER_MS, 30 * 60 * 1000);
-  // 预估算法本身不动：qwen 1024×1536 的预估总时长仍约 6.9 分钟，
-  // 只是不再拿它当核查触发条件（Live Activities 的预计完成时间照旧用它）
+  // 预估算法口径：qwen 1024×1536 的预估总时长约 9 分钟（生成约 4 分钟 +
+  // 排队留量 5 分钟）；生成段按 2026-11-15 实测重标过（2048×3072 约 16 分钟），
+  // 不再拿预估当核查触发条件（Live Activities 的预计完成时间照旧用它）
   const est = estimateTotalMs({ model: "qwen", width: 1024, height: 1536 });
-  assert.ok(est > 6 * 60 * 1000 && est < 8 * 60 * 1000);
+  assert.ok(est > 8 * 60 * 1000 && est < 10 * 60 * 1000);
   const base = { model: "qwen", width: 1024, height: 1536, stage: "queued" };
   // 29 分钟不核查，31 分钟核查；正好 30 分钟也不触发（严格大于）
   assert.equal(isQueueOverdue({ ...base, stageStartedAt: now - 29 * 60 * 1000 }, now), false);

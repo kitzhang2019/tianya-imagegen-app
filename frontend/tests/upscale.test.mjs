@@ -222,6 +222,28 @@ test("pushToGallery：传 contentType=image/webp 时图片以 WebP 类型发出�
   assert.equal(file.name, "moss_dash_4.png");
 });
 
+// 画廊推送补 steps / cfg / text_encoder / vae（v1.2.13）：值与画廊服务端
+// MODEL_PARAMS 一致，详情页不再靠服务端按时间查表兜底。
+test("pushToGallery：四模型都带 steps/cfg/text_encoder/vae，且值与画廊服务端 MODEL_PARAMS 一致", async () => {
+  const getBody = stubFetchCapture();
+  const cases = [
+    { model: "moss", steps: "25", cfg: "3.5", text_encoder: "Qwen3.5-9B w4a8", vae: "FLUX.2 small" },
+    { model: "qwen", steps: "25", cfg: "3", text_encoder: "Qwen3-VL 8B int8", vae: "Qwen Image 2.1 VAE" },
+    { model: "krea2", steps: "8", cfg: "1", text_encoder: "Qwen3-VL 4B fp8", vae: "Qwen Image VAE" },
+    { model: "zimage", steps: "8", cfg: "1", text_encoder: "Qwen3-4B FP8", vae: "Flux VAE" },
+  ];
+  for (const c of cases) {
+    const job = { model: c.model, prompt: "p", seed: 5, width: 2048, height: 3072, createdAt: 1700000000000, loraKeys: [] };
+    const res = await pushToGallery({ url: "https://x/upload.php", key: "k", job, imageBytes: new Uint8Array([1]), fileName: "a.webp", contentType: "image/webp" });
+    assert.equal(res.ok, true, c.model);
+    const body = getBody();
+    assert.equal(body.get("steps"), c.steps, `${c.model} steps`);
+    assert.equal(body.get("cfg"), c.cfg, `${c.model} cfg`);
+    assert.equal(body.get("text_encoder"), c.text_encoder, `${c.model} text_encoder`);
+    assert.equal(body.get("vae"), c.vae, `${c.model} vae`);
+  }
+});
+
 test("MOSS 尺寸表（2026-11-16，只改底图 1280）：最终短边 2560、底图短边 1280，2:3 为 2560x3840", () => {
   // 每档最终尺寸短边都是 2560（底图短边 1280），边长都能被 32 整除
   // （底图边长即能被 16 整除，latent 要求满足）。
@@ -242,7 +264,8 @@ test("ratioOptionLabel：比例选项后面括号里写原始尺寸（底图）�
   assert.equal(ratioOptionLabel("moss", "r9x16v"), "9:16竖 (1280×2272)");
   assert.equal(ratioOptionLabel("moss", "r1x1"), "1:1 (1280×1280)");
   // 非 MOSS 模型走 QWEN_SIZES 表，尺寸跟着换，同样写底图
-  assert.equal(ratioOptionLabel("qwen", "r2x3v"), "2:3竖 (880×1312)");
-  assert.equal(ratioOptionLabel("krea2", "r2x3v"), "2:3竖 (880×1312)");
-  assert.equal(ratioOptionLabel("zimage", "r2x3v"), "2:3竖 (880×1312)");
+  // （2026-11-16：Qwen/Krea2/Z-Image 底图短边提到 1024，2:3 底图 1024×1536）
+  assert.equal(ratioOptionLabel("qwen", "r2x3v"), "2:3竖 (1024×1536)");
+  assert.equal(ratioOptionLabel("krea2", "r2x3v"), "2:3竖 (1024×1536)");
+  assert.equal(ratioOptionLabel("zimage", "r2x3v"), "2:3竖 (1024×1536)");
 });

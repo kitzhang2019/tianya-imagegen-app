@@ -24,7 +24,7 @@ const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 // WebP 魔数：前 4 字节 RIFF，第 9-12 字节 WEBP。
 const WEBP_RIFF = [0x52, 0x49, 0x46, 0x46];
 const WEBP_MARK = [0x57, 0x45, 0x42, 0x50];
-export const MAX_PNG_BYTES = 20 * 1024 * 1024; // 回存 PNG 上限 20MB（用户规则：生成图 <20MB；2560×3840 的 PNG 约 12MB，8MB 装不下）
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 回存图片上限 20MB（用户规则：生成图 <20MB；PNG 和 WebP 共用；2560×3840 的 PNG 约 12MB，8MB 装不下）
 
 export class KaggleError extends Error {
   constructor(message, status = null) {
@@ -419,7 +419,7 @@ export class KaggleClient {
         }
         const bytes = res.bytes;
         if (!bytes || bytes.length === 0) throw new Error("下载到的结果图是空的");
-        if (bytes.length > MAX_PNG_BYTES) {
+        if (bytes.length > MAX_IMAGE_BYTES) {
           throw new KaggleError(`结果图 ${(bytes.length / 1e6).toFixed(1)}MB，超过 20MB 回存上限`);
         }
         if (!PNG_MAGIC.every((b, i) => bytes[i] === b)) {
@@ -461,7 +461,7 @@ export class KaggleClient {
         }
         const bytes = res.bytes;
         if (!bytes || bytes.length === 0) throw new Error("下载到的结果图是空的");
-        if (bytes.length > MAX_PNG_BYTES) {
+        if (bytes.length > MAX_IMAGE_BYTES) {
           throw new KaggleError(`结果图 ${(bytes.length / 1e6).toFixed(1)}MB，超过 20MB 回存上限`);
         }
         const isWebp = WEBP_RIFF.every((b, i) => bytes[i] === b) && WEBP_MARK.every((b, i) => bytes[8 + i] === b);

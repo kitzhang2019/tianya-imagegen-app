@@ -17,6 +17,7 @@ import {
   RATIO_KEYS,
   RATIO_LABELS,
   ZIMAGE_LORAS,
+  outputSizeForJob,
   ratioOptionLabel,
 } from "./lib/notebook.js";
 import {
@@ -297,7 +298,7 @@ function renderLoraBox() {
       `<span class="lora-title">LoRA（可多选，全不选就是不挂）</span>` +
       ZIMAGE_LORAS.map(
         (l) =>
-          `<label class="lora-row"><input type="checkbox" data-lora-key="${l.key}" ${loraState.zimage.includes(l.key) ? "checked" : ""} /> ${l.label}</label>`,
+          `<label class="lora-row"><input type="checkbox" data-lora-key="${l.key}" ${loraState.zimage.includes(l.key) ? "checked" : ""} /> ${l.switchLabel}</label>`,
       ).join("");
   } else {
     box.innerHTML = "";
@@ -408,7 +409,7 @@ function jobItemHtml(job) {
       <div class="job-info">
         <div class="job-top">
           <span class="badge">${MODEL_LABELS[job.model] ?? job.model}</span>
-          <span class="job-size">${job.width}×${job.height} · ${RATIO_LABELS[job.ratioKey] ?? ""}${job.ratioKey === "auto" ? "自动" : ""}</span>
+          <span class="job-size">${outputSizeForJob(job).width}×${outputSizeForJob(job).height} · ${RATIO_LABELS[job.ratioKey] ?? ""}${job.ratioKey === "auto" ? "自动" : ""}</span>
           <span class="job-time muted">${timeAgo(job.createdAt)}</span>
           <span class="job-chevron" aria-hidden="true">${expanded ? "▾" : "▸"}</span>
         </div>
@@ -499,7 +500,7 @@ function renderGallery() {
         ${dur ? `<span class="g-duration">${esc(dur)}</span>` : ""}
         <figcaption class="g-meta" data-view="${job.id}">
           <span class="g-model">${MODEL_LABELS[job.model] ?? job.model}</span>
-          <span class="g-size">${job.width}×${job.height}</span>
+          <span class="g-size">${outputSizeForJob(job).width}×${outputSizeForJob(job).height}</span>
           ${isRegen ? `<span class="g-pushed">↻ 重新生成</span>` : ""}
           ${pushed ? `<span class="g-pushed">✓ 已进画廊</span>` : ""}
         </figcaption>
@@ -613,7 +614,7 @@ function openResult(jobId) {
   currentResultJobId = jobId;
   resetZoom();
   $("result-img").src = src;
-  $("result-title").textContent = `${MODEL_LABELS[job.model] ?? job.model} · ${job.width}×${job.height}`;
+  $("result-title").textContent = `${MODEL_LABELS[job.model] ?? job.model} · ${outputSizeForJob(job).width}×${outputSizeForJob(job).height}`;
   $("result-meta").textContent = `种子 ${job.seed} · ${new Date(job.finishedAt || job.createdAt).toLocaleString()}`;
   const g = $("result-gallery");
   if (job.galleryPushed === true) {
