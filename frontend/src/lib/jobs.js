@@ -1474,12 +1474,26 @@ async function tick() {
   for (const job of jobs.filter(isActive)) syncLiveActivity(job);
 }
 
+let tickPromise = null;
+
+/** 立刻跑一轮轮询（切回前台时调用）。已有轮询在跑时，两次调用共用同一轮，
+ * 不重复发请求；调用方等这一轮跑完再继续，状态一定是新的。 */
+export function refreshJobsNow() {
+  if (tickPromise) return tickPromise;
+  tickPromise = tick()
+    .catch(() => undefined)
+    .finally(() => {
+      tickPromise = null;
+    });
+  return tickPromise;
+}
+
 export function startPolling() {
   if (pollTimer) return;
   pollTimer = setInterval(() => {
-    tick().catch(() => undefined);
+    refreshJobsNow();
   }, POLL_MS);
-  tick().catch(() => undefined);
+  refreshJobsNow();
 }
 
 export function stopPolling() {

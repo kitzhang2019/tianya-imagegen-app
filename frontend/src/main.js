@@ -38,6 +38,7 @@ import {
   onNetworkChange,
   pushJobToGallery,
   refetchJob,
+  refreshJobsNow,
   regenerateJob,
   retryJob,
   saveSettings,
@@ -1166,6 +1167,15 @@ if (Capacitor.isNativePlatform()) {
 
 initJobs().catch((e) => {
   toast(`初始化失败：${e instanceof Error ? e.message : String(e)}`);
+});
+
+// 切回前台立刻刷新一次任务状态：iOS 切到后台会挂起定时器，轮询停掉，
+// 回来只靠 20 秒定时器要等下一轮；切回来马上跑一轮，状态立刻跟上。
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refreshJobsNow();
+});
+window.addEventListener("focus", () => {
+  refreshJobsNow();
 });
 
 // 断网横条：网络断开时显示“网络暂时断开，正在重连…”，重连成功后消失。
