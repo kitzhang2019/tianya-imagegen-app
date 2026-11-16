@@ -121,15 +121,18 @@ export function detectRatioKeyFromPrompt(prompt) {
   return "r3x4v";
 }
 
-/** 比例选项的显示文字：比例名 + 该模型下实际像素尺寸，如 "2:3竖 (2560×3840)"。
- * 2026-11-16 用户要求：下拉框只写比例名看不出尺寸，括号里要写上多少×多少。
- * 尺寸按模型取表（MOSS 用 MOSS_SIZES，其余用 QWEN_SIZES）。 */
+/** 比例选项的显示文字：比例名 + 该模型下原始尺寸，如 "2:3竖 (1280×1920)"。
+ * 2026-11-16 用户要求：下拉框只写比例名看不出尺寸，括号里要写上多少×多少；
+ * 同日用户纠正：括号里写原始尺寸（底图），不要写超分后的尺寸——超分后
+ * 的最终尺寸在任务列表里已经显示了（任务的宽高就是最终尺寸）。
+ * 尺寸按模型取表（MOSS 用 MOSS_SIZES，其余用 QWEN_SIZES），再取一半得底图。 */
 export function ratioOptionLabel(model, key) {
   const table = model === "moss" ? MOSS_SIZES : QWEN_SIZES;
   const size = table[key];
   const name = RATIO_LABELS[key] ?? key;
   if (!size) return name;
-  return `${name} (${size.width}×${size.height})`;
+  const base = upscaleOffSize(size.width, size.height);
+  return `${name} (${base.width}×${base.height})`;
 }
 
 /** 解析最终尺寸：ratioKey 为 "auto" 时从提示词里猜，否则直接查表。 */
