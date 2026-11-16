@@ -863,12 +863,15 @@ textarea {
 }
 
 /* 图库底部操作栏（选择模式下出现）：直接贴在图片下方，无阴影、无渐变底色，
-   只留一层淡淡的毛玻璃保证文字可读，滚动时底下的图会透出来但不会糊成一片黑影 */
+   只留一层淡淡的毛玻璃保证文字可读，滚动时底下的图会透出来但不会糊成一片黑影。
+   分享按钮居中（单选在选中图正下方、多选在屏幕中间下方），不要放右边；
+   按钮改小一号。选中张数贴在左边，不占按钮的居中位置。 */
 .gallery-actions {
   position: sticky;
   bottom: 0;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   padding: 12px 4px 2px;
   background: transparent;
@@ -877,7 +880,8 @@ textarea {
 }
 
 .gallery-actions .muted {
-  flex: 1;
+  position: absolute;
+  left: 4px;
   font-size: 13px;
 }
 
@@ -885,10 +889,11 @@ textarea {
 .gallery-actions .secondary-btn {
   flex: none;
   width: auto;
-  min-height: 46px;
-  padding: 0 18px;
+  min-height: 38px;
+  padding: 0 16px;
   margin-top: 0;
-  font-size: 15px;
+  font-size: 14px;
+  border-radius: 12px;
 }
 
 /* 分享小面板（底部弹出） */
