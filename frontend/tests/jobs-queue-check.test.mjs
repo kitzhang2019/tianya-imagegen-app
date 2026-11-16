@@ -159,9 +159,11 @@ test("isQueueOverdue：只看排队阶段 + 进排队超 30 分钟（绝对时�
   // 不在排队阶段：再久也不核查
   assert.equal(isQueueOverdue({ ...base, stage: "running", stageStartedAt: now - 31 * 60 * 1000 }, now), false);
   assert.equal(isQueueOverdue({ ...base, stage: "queued-local", stageStartedAt: now - 31 * 60 * 1000 }, now), false);
-  // MOSS 一单预估约 80 分钟：以前排队 50 分钟触发不了，现在 31 分钟就能触发
-  const moss = { model: "moss", width: 2048, height: 3072, stage: "queued" };
-  assert.ok(estimateTotalMs(moss) > 60 * 60 * 1000);
+  // MOSS 2:3 一单预估约 51 分钟（2026-11-16 底图改 1280 后，实测约 46 分钟
+  // 生成 + 5 分钟排队留量）：以前排队 50 分钟触发不了（50 < 51），现在
+  // 31 分钟就能触发（绝对 30 分钟规则）。
+  const moss = { model: "moss", width: 2560, height: 3840, stage: "queued" };
+  assert.ok(estimateTotalMs(moss) > 50 * 60 * 1000);
   assert.equal(isQueueOverdue({ ...moss, stageStartedAt: now - 50 * 60 * 1000 }, now), true);
 });
 

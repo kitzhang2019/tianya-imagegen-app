@@ -7,11 +7,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  MOSS_SIZES,
   SEEDVR_DATASET,
   collectDatasetSources,
   normalizeUseUpscale,
   outputSizeForJob,
   patchNotebook,
+  resolveSize,
   upscalerLabelForJob,
   upscaleOffSize,
 } from "../src/lib/notebook.js";
@@ -199,4 +201,18 @@ test("pushToGallery：开超分写任务尺寸 + SeedVR 7B；关写底图尺寸 
   assert.equal(body.get("width"), "1696");
   assert.equal(body.get("height"), "2256");
   assert.equal(body.get("upscaler"), "SeedVR 7B");
+});
+
+test("MOSS 尺寸表（2026-11-16，只改底图 1280）：最终短边 2560、底图短边 1280，2:3 为 2560x3840", () => {
+  // 每档最终尺寸短边都是 2560（底图短边 1280），边长都能被 32 整除
+  // （底图边长即能被 16 整除，latent 要求满足）。
+  for (const [key, size] of Object.entries(MOSS_SIZES)) {
+    assert.equal(Math.min(size.width, size.height), 2560, `${key} 短边应为 2560`);
+    assert.equal(size.width % 32, 0, `${key} 宽应能被 32 整除`);
+    assert.equal(size.height % 32, 0, `${key} 高应能被 32 整除`);
+    const base = upscaleOffSize(size.width, size.height);
+    assert.equal(Math.min(base.width, base.height), 1280, `${key} 底图短边应为 1280`);
+  }
+  assert.deepEqual(resolveSize("moss", "r2x3v"), { key: "r2x3v", width: 2560, height: 3840, label: "2:3竖" });
+  assert.deepEqual(resolveSize("moss", "r9x16v"), { key: "r9x16v", width: 2560, height: 4544, label: "9:16竖" });
 });

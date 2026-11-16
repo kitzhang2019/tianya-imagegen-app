@@ -18,20 +18,25 @@ export const MODEL_LABELS = {
 
 export const MODEL_NAMES = ["moss", "qwen", "krea2", "zimage"];
 
-// 2.2x 尺寸表（MOSS）
+// MOSS 尺寸表（2026-11-16，用户定：只改底图 1280）。
+// 最终尺寸 = 底图 × 2（SeedVR 2x），底图短边 1280、最终短边 2560；
+// 长边按方向比例、取到 32 的倍数（最终边长能被 32 整除，则底图边长能被
+// 16 整除，latent 要求即满足）。2:3 为 2560×3840，与 1280 底图测试单
+// （moss-test2-1280base-20261116b）一致。旧表底图只有 712×1264 /
+// 848×1264，比管理站的 1024×1536 小，出图偏 3D，见 2026-11-16 对比。
 export const MOSS_SIZES = {
-  r16x9h: { width: 2528, height: 1424 },
-  r9x16v: { width: 1424, height: 2528 },
-  r4x3h: { width: 2256, height: 1696 },
-  r3x4v: { width: 1696, height: 2256 },
-  r1x1: { width: 2256, height: 2256 },
-  r3x2h: { width: 2528, height: 1696 },
-  r2x3v: { width: 1696, height: 2528 },
-  r21x9: { width: 2960, height: 1264 },
-  r2x1h: { width: 3488, height: 1456 },
-  r1x2v: { width: 1456, height: 3488 },
-  r5x4h: { width: 2528, height: 2016 },
-  r4x5v: { width: 2016, height: 2528 },
+  r16x9h: { width: 4544, height: 2560 },
+  r9x16v: { width: 2560, height: 4544 },
+  r4x3h: { width: 3424, height: 2560 },
+  r3x4v: { width: 2560, height: 3424 },
+  r1x1: { width: 2560, height: 2560 },
+  r3x2h: { width: 3840, height: 2560 },
+  r2x3v: { width: 2560, height: 3840 },
+  r21x9: { width: 5984, height: 2560 },
+  r2x1h: { width: 5120, height: 2560 },
+  r1x2v: { width: 2560, height: 5120 },
+  r5x4h: { width: 3200, height: 2560 },
+  r4x5v: { width: 2560, height: 3200 },
 };
 
 // 2.1x 尺寸表（Qwen / Krea2 / Z-Image 共用）
