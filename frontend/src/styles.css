@@ -862,7 +862,8 @@ textarea {
   border-color: transparent;
 }
 
-/* 图库底部操作栏（选择模式下出现） */
+/* 图库底部操作栏（选择模式下出现）：直接贴在图片下方，无阴影、无渐变底色，
+   只留一层淡淡的毛玻璃保证文字可读，滚动时底下的图会透出来但不会糊成一片黑影 */
 .gallery-actions {
   position: sticky;
   bottom: 0;
@@ -870,7 +871,9 @@ textarea {
   align-items: center;
   gap: 10px;
   padding: 12px 4px 2px;
-  background: linear-gradient(to top, var(--bg) 70%, transparent);
+  background: transparent;
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(20px) saturate(150%);
 }
 
 .gallery-actions .muted {
