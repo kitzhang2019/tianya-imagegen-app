@@ -478,8 +478,20 @@ export class KaggleClient {
     throw new KaggleError(`下载结果图失败（已重试 ${attempts} 次）：${lastError}`);
   }
 
-  /** 数据集 <owner>/<slug> 里有没有 Moody 模型文件（精确字节数）。true/false/null（null=问不到，不当作没有）。 */
-  async datasetHasMoodyFile(ref) {
+  /** 数据集 <owner>/<slug> 里有没有 Moody 模型文件（精确字节数）。true/false/null（null=问不到，不当作没有）。
+   *  查到“没有”时等几秒再问一次才下结论：Kaggle 接口偶尔抽风回 404/空列表，
+   *  单次回答当铁证会把好好的任务误杀（2026-11-16 用户实测：数据集和文件明明都在，
+   *  App 却报“找不到完整模型文件”）。第二次问到就认，第二次还是没有才认“没有”，
+   *  第二次问不到就按问不到算（不判死刑，走“暂时连不上云端”那条软路）。 */
+  async datasetHasMoodyFile(ref, { retryDelayMs = 5000 } = {}) {
+    const first = await this._datasetHasMoodyFileOnce(ref);
+    if (first !== false) return first;
+    await sleep(retryDelayMs);
+    return this._datasetHasMoodyFileOnce(ref);
+  }
+
+  /** 单次核查：true=有，false=答了没有，null=问不到。 */
+  async _datasetHasMoodyFileOnce(ref) {
     let answered = false;
     try {
       const res = await this._fetchJson(`${KAGGLE_API_BASE}/datasets/list/${ref}`, { method: "GET", timeoutMs: 20000 });
