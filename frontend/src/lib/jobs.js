@@ -490,6 +490,7 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
     error: null,
     imagePath: null,
     imageFileName: outputFileName(model, id),
+    webpFileName: null, // 下载回存时顺带下的同名 WebP（画廊推送用，PNG 超 10MB 推不动时推它）
     galleryPushed: null,
     galleryError: null,
     regeneratedFrom: null, // 重新生成时，指向原图任务 id
@@ -684,12 +685,39 @@ export function getJobProgress(job) {
   }
 }
 
-/** 手动推送到画廊（图库多选推送用）：读本机图片文件，按画廊设置推送，更新任务状态。 */
+/** 手动推送到画廊（图库多选推送用）：读本机图片文件，按画廊设置推送，更新任务状态。
+ * 优先推 WebP：2560×3840 的 PNG 约 12MB 超过画廊 10MB 上传上限（实测回 502），
+ * 同名 WebP 只有约 1.25MB；没 WebP（老任务）才回退推 PNG。 */
 export async function pushJobToGallery(id) {
   const job = jobs.find((j) => j.id === id);
   if (!job) throw new Error("找不到这条任务");
   if (job.status !== "done" || !job.imageFileName) throw new Error("这张图还没完成，推不了");
   if (!settings.galleryKey) throw new Error("请先在设置里填好画廊推送密钥");
+  // 优先用下载回存时顺带下的 WebP，没有就用 PNG。
+  let fileName = job.imageFileName;
+  let contentType = "image/png";
+  if (job.webpFileName) {
+    try {
+      const { data } = await Filesystem.readFile({ path: `images/${job.webpFileName}`, directory: Directory.Data });
+      const bytes = base64ToBytes(data);
+      const push = await pushToGallery({
+        url: settings.galleryUrl,
+        key: settings.galleryKey,
+        job,
+        imageBytes: bytes,
+        fileName: job.webpFileName,
+        contentType: "image/webp",
+      });
+      updateJob(job.id, {
+        galleryPushed: push.ok,
+        galleryError: push.ok ? null : push.error,
+      });
+      await saveJobs();
+      return push;
+    } catch {
+      // WebP 读不到就回退推 PNG。
+    }
+  }
   let bytes;
   try {
     const { data } = await Filesystem.readFile({ path: `images/${job.imageFileName}`, directory: Directory.Data });
@@ -701,8 +729,9 @@ export async function pushJobToGallery(id) {
     url: settings.galleryUrl,
     key: settings.galleryKey,
     job,
-    pngBytes: bytes,
-    fileName: job.imageFileName,
+    imageBytes: bytes,
+    fileName,
+    contentType,
   });
   updateJob(job.id, {
     galleryPushed: push.ok,
@@ -721,6 +750,13 @@ export async function deleteJob(id) {
       await Filesystem.deleteFile({ path: `images/${job.imageFileName}`, directory: Directory.Data });
     } catch {
       // 文件删不掉不影响记录删除
+    }
+    if (job.webpFileName) {
+      try {
+        await Filesystem.deleteFile({ path: `images/${job.webpFileName}`, directory: Directory.Data });
+      } catch {
+        // WebP 删不掉不影响
+      }
     }
     if (job.thumbFileName) {
       try {
@@ -1079,6 +1115,28 @@ async function finishJob(job, url = null) {
     const uri = await Filesystem.getUri({ path: `images/${job.imageFileName}`, directory: Directory.Data });
     blobUrls.set(job.id, URL.createObjectURL(new Blob([bytes], { type: "image/png" })));
 
+    // 顺带把同名 WebP 也下回来（画廊推送改推 WebP 用）：kernel 同时产 .png
+    // 与 .webp 两份，2560×3840 的 PNG 约 12MB 超过画廊 10MB 上传上限
+    // （实测 12MB 推画廊回 502），WebP 只有约 1.25MB，推得动。
+    // WebP 下不到不影响出图（PNG 已存好），推送时没 WebP 就回退推 PNG。
+    let webpFileName = null;
+    try {
+      const webpName = String(job.imageFileName).replace(/\.png$/i, ".webp");
+      const foundWebp = await client.findOutputFile(job.kaggleRef, webpName, { budgetMs: FIND_BUDGET_MS });
+      if (foundWebp.ok && foundWebp.url) {
+        const webpBytes = await client.downloadWebp(foundWebp.url);
+        await Filesystem.writeFile({
+          path: `images/${webpName}`,
+          data: bytesToBase64(webpBytes),
+          directory: Directory.Data,
+          recursive: true,
+        });
+        webpFileName = webpName;
+      }
+    } catch {
+      webpFileName = null;
+    }
+
     // 图库网格用的 WebP 缩略图（失败不影响出图）
     const doneJob = jobs.find((j) => j.id === job.id) || job;
     await buildThumbnail(doneJob, bytes);
@@ -1089,6 +1147,7 @@ async function finishJob(job, url = null) {
       stageDetail: "已完成，图片已保存",
       finishedAt: Date.now(),
       imagePath: uri.uri,
+      webpFileName,
       downloadStartedAt: null,
     });
     await saveJobs();

@@ -21,6 +21,9 @@ export const MOODY_MODEL_FILE =
 export const MOODY_MODEL_BYTES = 5088901904;
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+// WebP 魔数：前 4 字节 RIFF，第 9-12 字节 WEBP。
+const WEBP_RIFF = [0x52, 0x49, 0x46, 0x46];
+const WEBP_MARK = [0x57, 0x45, 0x42, 0x50];
 export const MAX_PNG_BYTES = 20 * 1024 * 1024; // 回存 PNG 上限 20MB（用户规则：生成图 <20MB；2560×3840 的 PNG 约 12MB，8MB 装不下）
 
 export class KaggleError extends Error {
@@ -421,6 +424,49 @@ export class KaggleClient {
         }
         if (!PNG_MAGIC.every((b, i) => bytes[i] === b)) {
           throw new KaggleError("下载到的文件不是 PNG（Kaggle 返回的内容不对）");
+        }
+        return bytes;
+      } catch (e) {
+        if (e instanceof KaggleError) throw e;
+        lastError = e instanceof Error ? e.message : String(e);
+        if (attempt < attempts - 1) await sleep(attempt === 0 ? 2000 : 4000);
+      }
+    }
+    throw new KaggleError(`下载结果图失败（已重试 ${attempts} 次）：${lastError}`);
+  }
+
+  /**
+   * 从签名 URL 下载结果 WebP（不带 Authorization），与 downloadPng 同款逻辑。
+   * 校验 WebP 魔数（RIFF....WEBP）与 20MB 上限；网络/HTTP 失败重试 3 次。
+   * 用途：画廊推送改推 WebP——2560×3840 的 PNG 约 12MB 超过画廊 10MB
+   * 上传上限（实测 12MB 推画廊回 502），WebP 只有约 1.25MB，推得动。
+   */
+  async downloadWebp(url, { attempts = 3 } = {}) {
+    let parsed = null;
+    try {
+      parsed = new URL(url);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || parsed.protocol !== "https:") {
+      throw new KaggleError("Kaggle 给的结果下载地址不是有效的 https 地址");
+    }
+    url = relayDownloadUrl(url);
+    let lastError = "";
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const res = await httpRequest({ url, method: "GET", timeoutMs: 120000, responseType: "arraybuffer" });
+        if (res.status < 200 || res.status >= 300) {
+          throw new Error(`下载结果图时返回 HTTP ${res.status}`);
+        }
+        const bytes = res.bytes;
+        if (!bytes || bytes.length === 0) throw new Error("下载到的结果图是空的");
+        if (bytes.length > MAX_PNG_BYTES) {
+          throw new KaggleError(`结果图 ${(bytes.length / 1e6).toFixed(1)}MB，超过 20MB 回存上限`);
+        }
+        const isWebp = WEBP_RIFF.every((b, i) => bytes[i] === b) && WEBP_MARK.every((b, i) => bytes[8 + i] === b);
+        if (!isWebp) {
+          throw new KaggleError("下载到的文件不是 WebP（Kaggle 返回的内容不对）");
         }
         return bytes;
       } catch (e) {

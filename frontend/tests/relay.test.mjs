@@ -141,6 +141,49 @@ test("downloadPng：非白名单 host 实际请求保持直连", async () => {
   assert.equal(seen[0], original);
 });
 
+// 画廊推送改推 WebP（v1.2.12）：PNG 约 12MB 超过画廊 10MB 上传上限（实测回 502），
+// WebP 约 1.25MB 才推得动。downloadWebp 校验 RIFF....WEBP 魔数。
+const WEBP_BYTES = new Uint8Array([
+  0x52, 0x49, 0x46, 0x46, 0x10, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+]);
+
+function webpRes(status = 200) {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: () => "image/webp" },
+    text: async () => "",
+    arrayBuffer: async () => WEBP_BYTES.buffer.slice(0),
+  };
+}
+
+test("downloadWebp：接受合法 WebP（RIFF....WEBP 魔数），且走中转", async () => {
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    seen.push(String(url));
+    return webpRes(200);
+  };
+  const client = new KaggleClient({ username: "u", key: "t" });
+  const original = "https://www.kaggleusercontent.com/abc123/output.webp?token=zzz";
+  const bytes = await client.downloadWebp(original);
+  assert.equal(seen.length, 1);
+  assert.equal(
+    seen[0],
+    `https://kaggle.tianyagk.dpdns.org/dl?url=${encodeURIComponent(original)}`,
+  );
+  assert.deepEqual([...bytes.slice(0, 4)], [0x52, 0x49, 0x46, 0x46]);
+  assert.deepEqual([...bytes.slice(8, 12)], [0x57, 0x45, 0x42, 0x50]);
+});
+
+test("downloadWebp：拿到 PNG 内容直接报错（不重试）", async () => {
+  globalThis.fetch = async () => pngRes(200);
+  const client = new KaggleClient({ username: "u", key: "t" });
+  await assert.rejects(
+    () => client.downloadWebp("https://www.kaggleusercontent.com/abc123/output.webp"),
+    /不是 WebP/,
+  );
+});
+
 test("pushKernel：提交 POST 到中转 /kernels/push，Authorization 原样带上", async () => {
   const seen = [];
   globalThis.fetch = async (url, opts) => {

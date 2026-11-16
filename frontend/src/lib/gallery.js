@@ -30,12 +30,12 @@ export const GALLERY_MODEL_LABELS = {
 };
 
 /**
- * @param {{url:string, key:string, job:{model:string, prompt:string, seed:number, width:number, height:number, createdAt:number}, pngBytes:Uint8Array, fileName:string}} args
+ * @param {{url:string, key:string, job:{model:string, prompt:string, seed:number, width:number, height:number, createdAt:number}, imageBytes:Uint8Array, fileName:string, contentType?:string}} args
  * @returns {Promise<{ok:boolean, error:string|null}>}
  */
-export async function pushToGallery({ url, key, job, pngBytes, fileName }) {
+export async function pushToGallery({ url, key, job, imageBytes, fileName, contentType = "image/png" }) {
   if (!key) return { ok: false, error: "画廊推送密钥未配置" };
-  if (!pngBytes || pngBytes.length === 0) return { ok: false, error: "没有图片数据" };
+  if (!imageBytes || imageBytes.length === 0) return { ok: false, error: "没有图片数据" };
   const endpoint = (url || "").trim() || DEFAULT_GALLERY_URL;
   const modelLabel = GALLERY_MODEL_LABELS[job.model] ?? "MOSS-Image";
   // 宽高写实际出图尺寸：开超分 = 任务尺寸，关超分 = 底图尺寸（最终尺寸的一半）。
@@ -63,9 +63,9 @@ export async function pushToGallery({ url, key, job, pngBytes, fileName }) {
       entries.push({
         type: "base64File",
         key: "image",
-        value: bytesToBase64(pngBytes),
+        value: bytesToBase64(imageBytes),
         fileName,
-        contentType: "image/png",
+        contentType,
       });
       const res = await CapacitorHttp.request({
         url: endpoint,
@@ -78,7 +78,8 @@ export async function pushToGallery({ url, key, job, pngBytes, fileName }) {
         // boundary（overrideContentType），不用这里写死。
         headers: { "Content-Type": "multipart/form-data" },
         connectTimeout: 15000,
-        readTimeout: 60000,
+        // 读超时 120 秒：推 WebP 只有约 1.25MB，但慢网下仍要留足时间。
+        readTimeout: 120000,
         responseType: "json",
       });
       const data = res.data ?? {};
@@ -91,9 +92,9 @@ export async function pushToGallery({ url, key, job, pngBytes, fileName }) {
     // 桌面浏览器：真实 FormData + fetch（需服务端放行 CORS 才能通）
     const form = new FormData();
     for (const [k, v] of Object.entries(fields)) form.set(k, v);
-    form.set("image", new Blob([pngBytes], { type: "image/png" }), fileName);
+    form.set("image", new Blob([imageBytes], { type: contentType }), fileName);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60000);
+    const timer = setTimeout(() => controller.abort(), 120000);
     try {
       const res = await fetch(endpoint, { method: "POST", body: form, signal: controller.signal });
       const data = await res.json().catch(() => null);

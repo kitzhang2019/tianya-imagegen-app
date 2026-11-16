@@ -181,7 +181,7 @@ function stubFetchCapture() {
 test("pushToGallery：开超分写任务尺寸 + SeedVR 7B；关写底图尺寸 + 无；老任务按开", async () => {
   const getBody = stubFetchCapture();
   const base = { model: "moss", prompt: "p", seed: 5, width: 1696, height: 2256, createdAt: 1700000000000, loraKeys: ["guanlan"] };
-  let res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: { ...base, useUpscale: true }, pngBytes: new Uint8Array([1]), fileName: "a.png" });
+  let res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: { ...base, useUpscale: true }, imageBytes: new Uint8Array([1]), fileName: "a.png" });
   assert.equal(res.ok, true);
   let body = getBody();
   assert.equal(body.get("width"), "1696");
@@ -189,19 +189,37 @@ test("pushToGallery：开超分写任务尺寸 + SeedVR 7B；关写底图尺寸 
   assert.equal(body.get("upscaler"), "SeedVR 7B");
   assert.equal(body.get("lora"), "观澜 LoRA 0.8");
 
-  res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: { ...base, useUpscale: false }, pngBytes: new Uint8Array([1]), fileName: "a.png" });
+  res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: { ...base, useUpscale: false }, imageBytes: new Uint8Array([1]), fileName: "a.png" });
   assert.equal(res.ok, true);
   body = getBody();
   assert.equal(body.get("width"), "848");
   assert.equal(body.get("height"), "1136");
   assert.equal(body.get("upscaler"), "无");
 
-  res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: base, pngBytes: new Uint8Array([1]), fileName: "a.png" });
+  res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: base, imageBytes: new Uint8Array([1]), fileName: "a.png" });
   assert.equal(res.ok, true);
   body = getBody();
   assert.equal(body.get("width"), "1696");
   assert.equal(body.get("height"), "2256");
   assert.equal(body.get("upscaler"), "SeedVR 7B");
+});
+
+// 画廊推送改推 WebP（v1.2.12）：2560×3840 的 PNG 约 12MB 超过画廊 10MB 上传上限
+// （实测 12MB 推画廊回 502），同名 WebP 只有约 1.25MB。contentType 跟着文件名走。
+test("pushToGallery：传 contentType=image/webp 时图片以 WebP 类型发出；默认仍是 PNG", async () => {
+  const getBody = stubFetchCapture();
+  const base = { model: "moss", prompt: "p", seed: 5, width: 2560, height: 3840, createdAt: 1700000000000, loraKeys: ["guanlan"] };
+  let res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: base, imageBytes: new Uint8Array([1]), fileName: "moss_dash_4.webp", contentType: "image/webp" });
+  assert.equal(res.ok, true);
+  let file = getBody().get("image");
+  assert.equal(file.type, "image/webp");
+  assert.equal(file.name, "moss_dash_4.webp");
+
+  res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: base, imageBytes: new Uint8Array([1]), fileName: "moss_dash_4.png" });
+  assert.equal(res.ok, true);
+  file = getBody().get("image");
+  assert.equal(file.type, "image/png");
+  assert.equal(file.name, "moss_dash_4.png");
 });
 
 test("MOSS 尺寸表（2026-11-16，只改底图 1280）：最终短边 2560、底图短边 1280，2:3 为 2560x3840", () => {
