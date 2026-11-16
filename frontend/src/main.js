@@ -37,6 +37,7 @@ import {
   onJobsChange,
   onNetworkChange,
   pushJobToGallery,
+  refetchJob,
   regenerateJob,
   retryJob,
   saveSettings,
@@ -429,6 +430,7 @@ function jobItemHtml(job) {
         <div class="job-actions">
           ${done && src ? `<button type="button" class="thumb-btn" data-view="${job.id}"><img src="${esc(src)}" alt="结果图" loading="lazy" /></button>` : ""}
           ${failed ? `<button type="button" class="mini-btn" data-retry="${job.id}">重新提交</button>` : ""}
+          ${job.status === "downloading" ? `<button type="button" class="mini-btn" data-refetch="${job.id}">重新取回</button>` : ""}
           <button type="button" class="mini-btn danger" data-delete="${job.id}">删除</button>
         </div>
         </div>
@@ -891,6 +893,19 @@ async function handleJobListClick(e) {
       const retried = await retryJob(retriedId);
       // retryJob 可能恢复云端还在跑的旧单（同 id），也可能新开一单（新 id）
       toast(retried.id === retriedId ? "云端这单还在，正在继续轮询" : "已用新种子重新提交");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err));
+    }
+    return;
+  }
+  const refetchBtn = e.target.closest("[data-refetch]");
+  if (refetchBtn) {
+    refetchBtn.disabled = true;
+    try {
+      const refetchedId = Number(refetchBtn.dataset.refetch);
+      await refetchJob(refetchedId);
+      const after = getJobs().find((j) => j.id === refetchedId);
+      toast(after?.status === "done" ? "已取回，图片已保存" : "已重新尝试取回，网络恢复后继续下载");
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err));
     }

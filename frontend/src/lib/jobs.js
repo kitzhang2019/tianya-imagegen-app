@@ -575,6 +575,30 @@ export async function retryJob(id) {
   return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale, kaggleSlug: slug });
 }
 
+/** 手动重新取回：下载卡住（网络断开、图已在云端）时点一下，立刻再试一次
+ * 下载，不重新生成、不换种子。重置 10 分钟下载上限的时钟：手动重取是一次
+ * 新的尝试，不该因为之前卡了 9 分钟就 1 分钟后被判失败。 */
+export async function refetchJob(id) {
+  const job = jobs.find((j) => j.id === id);
+  if (!job) throw new Error("找不到这条任务");
+  if (job.status === "done") throw new Error("这张图已经下好了，不用重新取回");
+  if (job.status === "failed") throw new Error("这单已经失败了，请点「重新提交」再试");
+  if (job.status !== "downloading" && job.status !== "running") throw new Error("这单还没到下载这一步，稍后再试");
+  if (!job.kaggleRef) throw new Error("云端还没有这单，暂时取不回来");
+  if (busyJobs.has(job.id)) throw new Error("正在下载，稍等一下");
+  requireCreds();
+  updateJob(job.id, {
+    status: "downloading",
+    stage: "downloading",
+    stageDetail: "正在重新取回结果图…",
+    downloadStartedAt: null,
+    error: null,
+  });
+  await saveJobs();
+  await finishJob(job);
+  return jobs.find((j) => j.id === job.id) || job;
+}
+
 /** 重新生成：同提示词/模型/比例新开一个任务（新种子），旧图保留，两图互相关联，方便对比。 */
 export async function regenerateJob(id) {
   const old = jobs.find((j) => j.id === id);
