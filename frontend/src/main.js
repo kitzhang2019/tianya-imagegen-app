@@ -415,7 +415,7 @@ function jobItemHtml(job) {
         <div class="job-detail" ${expanded ? "" : "hidden"}>
         <p class="job-prompt">${snippet}</p>
         <p class="job-stage ${failed ? "error" : ""}">${label}${job.stageDetail ? `：${esc(job.stageDetail)}` : ""}</p>
-        ${failed && job.error ? `<p class="job-error">${esc(job.error)}</p>` : ""}
+        ${failed && job.error && job.error !== job.stageDetail ? `<p class="job-error">${esc(job.error)}</p>` : ""}
         ${galleryLine ? `<p class="job-gallery">${galleryLine}</p>` : ""}
         <div class="job-actions">
           ${done && src ? `<button type="button" class="thumb-btn" data-view="${job.id}"><img src="${esc(src)}" alt="结果图" loading="lazy" /></button>` : ""}

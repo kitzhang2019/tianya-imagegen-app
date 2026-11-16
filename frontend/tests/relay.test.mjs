@@ -94,6 +94,40 @@ test("downloadPng：kaggleusercontent 地址实际请求走中转", async () => 
   assert.deepEqual([...bytes.slice(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 });
 
+test("downloadPng：12MB 的 PNG 能下载（2560×3840 的 PNG 约 12MB，8MB 上限装不下，2026-11-16 真单失败后改成 20MB）", async () => {
+  const SIZE = 12 * 1024 * 1024;
+  const big = new Uint8Array(SIZE);
+  big.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  globalThis.fetch = async () => ({
+    status: 200,
+    ok: true,
+    headers: { get: () => "image/png" },
+    text: async () => "",
+    arrayBuffer: async () => big.buffer.slice(0),
+  });
+  const client = new KaggleClient({ username: "u", key: "t" });
+  const bytes = await client.downloadPng("https://www.kaggleusercontent.com/abc123/output.png");
+  assert.equal(bytes.length, SIZE);
+});
+
+test("downloadPng：超过 20MB 的 PNG 直接报错（不重试）", async () => {
+  const SIZE = 21 * 1024 * 1024;
+  const big = new Uint8Array(SIZE);
+  big.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  globalThis.fetch = async () => ({
+    status: 200,
+    ok: true,
+    headers: { get: () => "image/png" },
+    text: async () => "",
+    arrayBuffer: async () => big.buffer.slice(0),
+  });
+  const client = new KaggleClient({ username: "u", key: "t" });
+  await assert.rejects(
+    () => client.downloadPng("https://www.kaggleusercontent.com/abc123/output.png"),
+    /超过 20MB/,
+  );
+});
+
 test("downloadPng：非白名单 host 实际请求保持直连", async () => {
   const seen = [];
   globalThis.fetch = async (url) => {

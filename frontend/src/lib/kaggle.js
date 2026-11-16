@@ -21,7 +21,7 @@ export const MOODY_MODEL_FILE =
 export const MOODY_MODEL_BYTES = 5088901904;
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-export const MAX_PNG_BYTES = 8 * 1024 * 1024;
+export const MAX_PNG_BYTES = 20 * 1024 * 1024; // 回存 PNG 上限 20MB（用户规则：生成图 <20MB；2560×3840 的 PNG 约 12MB，8MB 装不下）
 
 export class KaggleError extends Error {
   constructor(message, status = null) {
@@ -393,7 +393,7 @@ export class KaggleClient {
 
   /**
    * 从签名 URL 下载结果 PNG（不带 Authorization）。
-   * 校验 PNG 魔数与 8MB 上限；网络/HTTP 失败重试 3 次（2s / 4s 退避），
+   * 校验 PNG 魔数与 20MB 上限；网络/HTTP 失败重试 3 次（2s / 4s 退避），
    * 每次 120s 超时。内容不对（不是 PNG / 超大）不重试，直接报错。
    */
   async downloadPng(url, { attempts = 3 } = {}) {
@@ -417,7 +417,7 @@ export class KaggleClient {
         const bytes = res.bytes;
         if (!bytes || bytes.length === 0) throw new Error("下载到的结果图是空的");
         if (bytes.length > MAX_PNG_BYTES) {
-          throw new KaggleError(`结果图 ${(bytes.length / 1e6).toFixed(1)}MB，超过 8MB 回存上限`);
+          throw new KaggleError(`结果图 ${(bytes.length / 1e6).toFixed(1)}MB，超过 20MB 回存上限`);
         }
         if (!PNG_MAGIC.every((b, i) => bytes[i] === b)) {
           throw new KaggleError("下载到的文件不是 PNG（Kaggle 返回的内容不对）");

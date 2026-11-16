@@ -531,6 +531,7 @@ export async function retryJob(id) {
       stageDetail: "云端已找到这单任务，恢复轮询…",
       error: null,
       finishedAt: null,
+      downloadStartedAt: null,
     });
     await saveJobs();
     verifyKernel(old, makeClient());
@@ -1029,11 +1030,15 @@ async function finishJob(job, url = null) {
   busyJobs.add(job.id);
   const client = makeClient();
   try {
+    // downloadStartedAt 只在第一次进下载时记，之后重试不再重置——10 分钟上限
+    // 算的是总重试时长。之前每次 finishJob 都重置成现在，导致上限永远到不了，
+    // 只有 App 切后台、轮询停了才会在恢复时误触。
+    const started = jobs.find((j) => j.id === job.id) || job;
     updateJob(job.id, {
       status: "downloading",
       stage: "downloading",
       stageDetail: "正在下载结果图…",
-      downloadStartedAt: Date.now(),
+      downloadStartedAt: started.downloadStartedAt || Date.now(),
     });
     await saveJobs();
 
