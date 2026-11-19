@@ -95,6 +95,42 @@ export function splitKaggleRef(ref) {
   return { userName: parts[0], kernelSlug: parts[1] };
 }
 
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 是不是 kernel 实际产出的最终图：`{prefix}_数字.png/.webp`（如
+ * moss_dash_16.png；ComfyUI 原始落盘名 `{prefix}_数字_00001_.png` 也认）。
+ * lowres 中间文件（名字里带 lowres）一律排除。 */
+export function isFinalImageName(fileName, prefix, ext) {
+  const base = String(fileName || "").split("/").pop() || "";
+  if (/lowres/i.test(base)) return false;
+  return new RegExp(`^${escapeRegExp(prefix)}_\\d+(?:_\\d+_)?\\.${escapeRegExp(ext)}$`, "i").test(base);
+}
+
+/** 成品文件名里的数字（如 moss_dash_16.png -> 16），取不到返回 -1。 */
+export function resultImageNumber(fileName) {
+  const m = /_(\d+)(?:_\d+_)?\.(?:png|webp)$/i.exec(String(fileName || "").split("/").pop() || "");
+  return m ? parseInt(m[1], 10) : -1;
+}
+
+/** 多个候选成品里挑一个：优先与 preferredId（任务号）同号的，其次取
+ * 最大的（有 size 按 size，没有按文件名里的数字取最新的一次产出）。 */
+export function pickBestResult(cands, preferredId = null) {
+  if (!cands || cands.length === 0) return null;
+  if (preferredId != null) {
+    const exact = cands.find((c) => resultImageNumber(c.fileName) === preferredId);
+    if (exact) return exact;
+  }
+  const withSize = cands.filter((c) => typeof c.size === "number");
+  if (withSize.length > 0) {
+    return [...withSize].sort(
+      (a, b) => b.size - a.size || resultImageNumber(b.fileName) - resultImageNumber(a.fileName),
+    )[0];
+  }
+  return [...cands].sort((a, b) => resultImageNumber(b.fileName) - resultImageNumber(a.fileName))[0];
+}
+
 /** 状态归一化：小写、去非字母、去 kernelworkerstatus 前缀后映射。 */
 export function normalizeKernelStatus(rawStatus) {
   const rawText = rawStatus ?? "";
@@ -369,28 +405,50 @@ export class KaggleClient {
   }
 
   /**
-   * 在 kernel 输出列表里找一个文件，返回签名下载 URL。
-   * 分页翻到找到为止；单次尝试有时间预算与 60 页上限，翻到哪一页
-   * 通过 resumeToken 交给下一次尝试接着翻，不用从头再走。
+   * 查输出列表的请求（v1.2.25 补）：网络层异常自动重试 3 次、带退避。
+   * 手机到中转这段 5G 信号一抖就会单次断掉（iOS 报 The network
+   * connection was lost），不是 Kaggle 或中转挂了——一次断了就直接报
+   * “连不上 Kaggle API”会吓用户，也会把轮询状态打乱。只重试网络层
+   * 抛出的异常；HTTP 状态码照常返回（不重试）。
    */
-  async findOutputFile(ref, fileName, { budgetMs = 150000, resumeToken = null, resumeScanned = 0 } = {}) {
+  async _fetchJsonRetry(url, opts, attempts = 3) {
+    let lastErr = null;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await this._fetchJson(url, opts);
+      } catch (e) {
+        lastErr = e;
+        if (i < attempts - 1) await sleep(i === 0 ? 400 : 800);
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * 翻 kernel 的输出列表，返回全部文件（{ fileName, url, size }）。
+   * 分页翻到底为止；单次尝试有时间预算与 60 页上限，翻到哪一页通过
+   * resumeToken 交给下一次尝试接着翻，不用从头再走。
+   * complete=true = 列表已翻完；false = 预算/页数到了或中途出错（error 里写原因），
+   * 调用方此时不能断言“没有文件”，只能等下一轮接着翻。
+   */
+  async listOutputFiles(ref, { budgetMs = 150000, resumeToken = null, resumeScanned = 0 } = {}) {
     const parts = splitKaggleRef(ref);
-    if (!parts) return { ok: false, error: `Kernel 引用格式不对（${ref}），无法查找输出`, resumeToken, scanned: resumeScanned };
-    const base = String(fileName).split("/").pop() ?? fileName;
+    if (!parts) return { files: [], resumeToken, scanned: resumeScanned, complete: false, error: `Kernel 引用格式不对（${ref}），无法查找输出` };
     const deadline = Date.now() + budgetMs;
     let pageToken = resumeToken;
     let scanned = resumeScanned;
+    const files = [];
     let pages = 0;
     while (true) {
       if (pages > 0 && Date.now() > deadline) {
-        return { ok: false, error: `输出列表很长（已扫 ${scanned} 个文件还没翻到 ${fileName}），下一轮会接着上次翻到的位置继续`, resumeToken: pageToken, scanned };
+        return { files, resumeToken: pageToken, scanned, complete: false, error: `输出列表很长（已扫 ${scanned} 个文件），下一轮会接着上次翻到的位置继续` };
       }
       if (pages >= 60) {
-        return { ok: false, error: `输出列表翻了 60 页还没找到 ${fileName}（已扫 ${scanned} 个文件），下一轮会接着翻`, resumeToken: pageToken, scanned };
+        return { files, resumeToken: pageToken, scanned, complete: false, error: `输出列表翻了 60 页还没翻完（已扫 ${scanned} 个文件），下一轮接着翻` };
       }
       let res;
       try {
-        res = await this._fetchJson(
+        res = await this._fetchJsonRetry(
           `${KAGGLE_API_BASE}/kernels.KernelsApiService/ListKernelSessionOutput`,
           {
             method: "POST",
@@ -398,27 +456,63 @@ export class KaggleClient {
             body: { ...parts, pageToken: pageToken ?? undefined },
           },
         );
-      } catch (e) {
-        return { ok: false, error: `连不上 Kaggle API（查输出列表）：${e instanceof Error ? e.message : String(e)}`, resumeToken: pageToken, scanned };
+      } catch {
+        return { files, resumeToken: pageToken, scanned, complete: false, error: `网络不太稳，输出列表查了 3 次都没通，下一轮再试（不是 Kaggle 挂了，多半是手机到中转这段断了一下）` };
       }
       if (res.status < 200 || res.status >= 300) {
-        return { ok: false, error: await kaggleRpcErrorDetail(res.status, res.text), resumeToken: pageToken, scanned };
+        return { files, resumeToken: pageToken, scanned, complete: false, error: await kaggleRpcErrorDetail(res.status, res.text) };
       }
       pages += 1;
-      const files = res.data?.files ?? [];
-      scanned += files.length;
-      for (const f of files) {
-        const name = f?.fileName ?? "";
-        if (name === fileName || name.split("/").pop() === base) {
-          return { ok: true, url: f.url, scanned, resumeToken: null };
-        }
+      const pageFiles = res.data?.files ?? [];
+      scanned += pageFiles.length;
+      for (const f of pageFiles) {
+        files.push({
+          fileName: f?.fileName ?? "",
+          url: f?.url ?? "",
+          size: typeof f?.size === "number" ? f.size : typeof f?.totalBytes === "number" ? f.totalBytes : null,
+        });
       }
       const next = res.data?.nextPageToken ?? null;
       if (!next) {
-        return { ok: false, error: `输出列表已翻完，没找到 ${fileName}（共扫 ${scanned} 个文件）`, resumeToken: null, scanned };
+        return { files, resumeToken: null, scanned, complete: true, error: null };
       }
       pageToken = next;
     }
+  }
+
+  /**
+   * 在 kernel 输出列表里找实际产出的最终图（v1.2.25 文件名错位修法）。
+   * 绝不按任务号拼文件名去找：任务 17、kernel 13、输出 moss_dash_16.png
+   * 三个号全对不上的教训——kernel 里实际的文件名用的是提交时写进
+   * notebook 的那个号，重提几次就和 App 的任务号错开了。
+   * 找法：扫整个输出列表，成品图是 `{prefix}_数字.png` / `{prefix}_数字.webp`
+   * （如 moss_dash_16.png），lowres 中间文件（`{model}_lowres_*`）与
+   * log 一律排除；多个候选时优先与 preferredId 同号的，其次取最大的
+   * （有 size 按 size，没有按文件名里的数字取最新的一次产出）。
+   * @returns {{png:{fileName,url,size}|null, webp:{fileName,url,size}|null,
+   *   scanned:number, exhausted:boolean, error:string|null, resumeToken:string|null}}
+   * exhausted=true = 列表已翻完（再等也不会有）；false = 没翻完或中途出错。
+   */
+  async findResultImage(ref, { prefix, preferredId = null, budgetMs = 150000, resumeToken = null, resumeScanned = 0 } = {}) {
+    const listed = await this.listOutputFiles(ref, { budgetMs, resumeToken, resumeScanned });
+    const pngs = listed.files.filter((f) => isFinalImageName(f.fileName, prefix, "png"));
+    const webps = listed.files.filter((f) => isFinalImageName(f.fileName, prefix, "webp"));
+    const png = pickBestResult(pngs, preferredId);
+    let webp = null;
+    if (webps.length > 0) {
+      const pngNum = png ? resultImageNumber(png.fileName) : -1;
+      webp =
+        (pngNum >= 0 ? webps.find((w) => resultImageNumber(w.fileName) === pngNum) : null) ||
+        pickBestResult(webps, preferredId);
+    }
+    return {
+      png,
+      webp,
+      scanned: listed.scanned,
+      exhausted: listed.complete,
+      error: listed.error,
+      resumeToken: listed.resumeToken,
+    };
   }
 
   /**
@@ -431,7 +525,7 @@ export class KaggleClient {
     if (!parts) return null;
     let res;
     try {
-      res = await this._fetchJson(
+      res = await this._fetchJsonRetry(
         `${KAGGLE_API_BASE}/kernels.KernelsApiService/ListKernelSessionOutput`,
         { method: "POST", timeoutMs: 30000, body: parts },
       );

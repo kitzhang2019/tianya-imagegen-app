@@ -491,6 +491,7 @@ async function failJob(job, message) {
     stageDetail: String(message).slice(0, 200),
     error: String(message).slice(0, 1000),
     finishedAt: Date.now(),
+    downloadStuck: null,
   });
   await saveJobs();
   notifyJob(job, false);
@@ -725,6 +726,7 @@ export async function refetchJob(id) {
       stageDetail: "正在重新取回结果图…",
       downloadStartedAt: null,
       error: null,
+      downloadStuck: null,
     });
     await saveJobs();
     await finishColabJob(job);
@@ -739,6 +741,7 @@ export async function refetchJob(id) {
     stageDetail: "正在重新取回结果图…",
     downloadStartedAt: null,
     error: null,
+    downloadStuck: null,
   });
   await saveJobs();
   await finishJob(job);
@@ -927,20 +930,27 @@ async function attachOrigInBackground(job, galleryId) {
       await fail("画廊推送密钥未配置");
       return;
     }
-    // 成品 PNG 的名字：任务的 PNG 文件名（WebP 先行时 imageFileName 是 .webp，
-    // 换回 .png 就是成品名；老路本身就是 .png 名）。
+    // 贴到画廊时的本地文件名（WebP 先行时 imageFileName 是 .webp，
+    // 换回 .png 就是成品名；老路本身就是 .png 名）。云端实际文件
+    // 不按这个名字找，见下面 findResultImage。
     const pngName = String(imageFileName || "").replace(/\.webp$/i, ".png");
     if (!pngName || !/\.png$/i.test(pngName)) {
       await fail("任务没有 PNG 文件名，补不了原图");
       return;
     }
     const client = makeClient();
-    const found = await client.findOutputFile(kaggleRef, pngName, { budgetMs: FIND_BUDGET_MS });
-    if (!found.ok || !found.url) {
-      await fail(found.error || `内核输出里没找到 ${pngName}`);
+    // 成品 PNG 按实际产出的找（任务号与 kernel 文件名可能对不上，同取图修法）；
+    // pngName 只作贴到画廊时的本地文件名。
+    const disc = await client.findResultImage(kaggleRef, {
+      prefix: resultPrefixFor(job.model),
+      preferredId: jobId,
+      budgetMs: FIND_BUDGET_MS,
+    });
+    if (!disc.png?.url) {
+      await fail(disc.exhausted ? "内核输出里没找到成品 PNG" : disc.error || "内核输出里没找到成品 PNG");
       return;
     }
-    const bytes = await client.downloadPng(found.url);
+    const bytes = await client.downloadPng(disc.png.url);
     const dims = pngDimensions(bytes);
     if (!dims) {
       await fail("下载到的 PNG 读不到尺寸，没贴");
@@ -1195,7 +1205,7 @@ function jobFromOrphan(orphan, status, stage) {
  * finishColabJob：WebP 先行、PNG 后台补、缩略图、进本地图库），
  * 不自动推画廊。插回后跟踪记录就清掉——下载本身由任务记录接手，
  * 断网重试走正常 downloading 流程。 */
-async function reinsertOrphanForDownload(orphan, kaggleUrl) {
+async function reinsertOrphanForDownload(orphan, discovered = null) {
   const job = jobFromOrphan(orphan, "downloading", "downloading");
   jobs.unshift(job);
   await saveJobs();
@@ -1203,7 +1213,7 @@ async function reinsertOrphanForDownload(orphan, kaggleUrl) {
   if (normalizeBackend(orphan.backend) === "colab") {
     await finishColabJob(job);
   } else {
-    await finishJob(job, kaggleUrl);
+    await finishJob(job, discovered);
   }
 }
 
@@ -1253,9 +1263,20 @@ async function tickKaggleOrphan(orphan) {
   orphan.lastCheckedAt = Date.now();
   if (!st.error && st.state !== "unknown") setNetworkDown(false);
   if (st.state === "complete") {
-    const found = await client.findOutputFile(orphan.kaggleRef, orphan.imageFileName, { budgetMs: PROBE_BUDGET_MS });
-    if (found.ok && found.url) {
-      await reinsertOrphanForDownload(orphan, found.url);
+    const disc = await client.findResultImage(orphan.kaggleRef, {
+      prefix: resultPrefixFor(orphan.model),
+      preferredId: orphan.id,
+      budgetMs: PROBE_BUDGET_MS,
+    });
+    if (disc.png?.url || disc.webp?.url) {
+      await reinsertOrphanForDownload(orphan, disc);
+      return;
+    }
+    if (disc.exhausted) {
+      await reinsertOrphanAsFailed(
+        orphan,
+        `云端已跑完，但在输出列表里没找到这单的成品图（共扫 ${disc.scanned} 个文件）。任务已从列表删除，后台取图结束。`,
+      );
       return;
     }
     orphan.lastError = "云端已跑完，但还没翻到结果图，下一轮再找";
@@ -1291,9 +1312,13 @@ async function tickKaggleOrphan(orphan) {
   }
   const has = await client.hasAnyOutputFile(orphan.kaggleRef);
   if (has === true) {
-    const found = await client.findOutputFile(orphan.kaggleRef, orphan.imageFileName, { budgetMs: PROBE_BUDGET_MS });
-    if (found.ok && found.url) {
-      await reinsertOrphanForDownload(orphan, found.url);
+    const disc = await client.findResultImage(orphan.kaggleRef, {
+      prefix: resultPrefixFor(orphan.model),
+      preferredId: orphan.id,
+      budgetMs: PROBE_BUDGET_MS,
+    });
+    if (disc.png?.url || disc.webp?.url) {
+      await reinsertOrphanForDownload(orphan, disc);
       return;
     }
   }
@@ -1787,26 +1812,57 @@ async function runJob(job) {
   }
 }
 
-/** 在输出列表里找结果图，找到就进入下载；找不到只更新说明，不判失败。 */
+/** 模型对应的 kernel 成品前缀（notebook 里写进文件名那个，如 moss_dash）。 */
+function resultPrefixFor(model) {
+  return (NOTEBOOK_KINDS[model] ?? NOTEBOOK_KINDS.moss).prefix;
+}
+
+/** 下载失败是不是“文件在云端不存在/内容不对”（HTTP 404 或魔数不对）——
+ * 这种错等一等也不会好，要记成卡住给人话、等用户点「重新取回」，
+ * 不能当网络抖动无限重试。 */
+function isMissingDownloadError(msg) {
+  return /HTTP 404|不是 PNG|不是 WebP/i.test(String(msg || ""));
+}
+
+/** 下载卡住：状态留在 downloading（环不动）、stageDetail 写一句人话
+ * （含云端实际文件名），downloadStuck=true 让 tick 不再自动重试；
+ * 用户点「重新取回」时 refetchJob 会清掉这个标记、真正再试一次。 */
+async function markDownloadStuck(job, remoteName, reason) {
+  const cause = /HTTP 404/i.test(String(reason || "")) ? "下载返回 404" : "下载到的内容不对";
+  updateJob(job.id, {
+    status: "downloading",
+    stage: "downloading",
+    stageDetail: `在 Kaggle 上没找到这单的成品图，文件名是 ${remoteName}（${cause}），点「重新取回」再试`,
+    downloadStuck: true,
+  });
+  await saveJobs();
+}
+
+/** 在输出列表里找结果图：扫列表找实际产出的最终图（不再按任务号拼名），
+ * 找到就返回发现结果；找不到返回带 exhausted/error 的发现结果。
+ * 网络异常（查了 3 次都没通）只记下来、不改任务状态：保持上次的状态
+ * 继续等下一轮，别让用户看到状态来回跳。 */
 async function probeOutput(job, client, budgetMs = PROBE_BUDGET_MS) {
-  const found = await client.findOutputFile(job.kaggleRef, job.imageFileName, {
+  const disc = await client.findResultImage(job.kaggleRef, {
+    prefix: resultPrefixFor(job.model),
+    preferredId: job.id,
     budgetMs,
     resumeToken: job.outputResumeToken,
     resumeScanned: job.outputScanned || 0,
   });
   updateJob(job.id, {
-    outputResumeToken: found.resumeToken ?? null,
-    outputScanned: found.scanned || 0,
+    outputResumeToken: disc.resumeToken ?? null,
+    outputScanned: disc.scanned || 0,
   });
   await saveJobs();
-  if (found.ok && found.url) return found.url;
-  if (found.error) {
-    // 排队中的任务：探输出的报错别把自动核查的备注盖掉
+  if (!disc.png && !disc.webp && disc.error && !isNetworkErrorText(disc.error)) {
+    // 非网络错（列表本身有问题，如凭据被拒）：写一句原因；排队中的任务
+    // 别把自动核查的备注盖掉
     const note = job.stage === "queued" && job.queueCheckNote ? ` ${job.queueCheckNote}` : "";
-    updateJob(job.id, { stageDetail: `${found.error.slice(0, 200)}${note}` });
+    updateJob(job.id, { stageDetail: `${String(disc.error).slice(0, 200)}${note}` });
     await saveJobs();
   }
-  return null;
+  return disc;
 }
 
 /** 后台下 PNG 原图：WebP 先行的任务完成后，后台把 12MB PNG 下回来存好，
@@ -2025,10 +2081,11 @@ async function finishColabJob(job) {
 }
 
 /** 下载回存 + 保存文件 + 画廊推送。 */
-async function finishJob(job, url = null) {
+async function finishJob(job, discovered = null) {
   if (busyJobs.has(job.id)) return;
   busyJobs.add(job.id);
   const client = makeClient();
+  let remoteName = job.imageFileName;
   try {
     // downloadStartedAt 只在第一次进下载时记，之后重试不再重置——10 分钟上限
     // 算的是总重试时长。之前每次 finishJob 都重置成现在，导致上限永远到不了，
@@ -2042,44 +2099,62 @@ async function finishJob(job, url = null) {
     });
     await saveJobs();
 
-    let downloadUrl = url;
-    if (!downloadUrl) {
-      const found = await client.findOutputFile(job.kaggleRef, job.imageFileName, {
+    const pngName = job.imageFileName;
+    const webpName = String(pngName).replace(/\.png$/i, ".webp");
+    // 取图不再按任务号拼文件名去找：扫输出列表找实际产出的最终图
+    // （任务 17 / kernel 13 / 文件 moss_dash_16.png 三个号对不上的教训）。
+    let disc = discovered;
+    if (!disc) {
+      disc = await client.findResultImage(job.kaggleRef, {
+        prefix: resultPrefixFor(job.model),
+        preferredId: job.id,
         budgetMs: FIND_BUDGET_MS,
         resumeToken: job.outputResumeToken,
         resumeScanned: job.outputScanned || 0,
       });
       updateJob(job.id, {
-        outputResumeToken: found.resumeToken ?? null,
-        outputScanned: found.scanned || 0,
+        outputResumeToken: disc.resumeToken ?? null,
+        outputScanned: disc.scanned || 0,
       });
       await saveJobs();
-      if (!found.ok || !found.url) {
-        // 没找到不是失败：回滚到 running，等下一轮轮询再找
+    }
+    if (!disc.png && !disc.webp) {
+      if (disc.exhausted) {
+        // 输出列表已翻完、确实没有成品图：再等也不会有，直接判失败并说清
+        // 原因，不要回滚到 running 让它在“下载中”和“没找到”之间死循环。
+        await failJob(
+          job,
+          `在 Kaggle 上没找到这单的成品图（输出列表已翻完，共扫 ${disc.scanned} 个文件，没有成品图；任务号与 kernel 里实际的文件名对不上也找不到）。请点「重新提交」再试。`,
+        );
+        return;
+      }
+      if (disc.error && isNetworkErrorText(disc.error)) {
+        setNetworkDown(true);
         updateJob(job.id, {
-          status: "running",
-          stage: "running",
-          stageDetail: (found.error || "还没在输出列表里找到结果图，等下一轮再找").slice(0, 200),
-          downloadStartedAt: null,
+          status: "downloading",
+          stage: "downloading",
+          stageDetail: "网络暂时断开，正在重连…（图已在云端，恢复后继续下载）",
         });
         await saveJobs();
         return;
       }
-      downloadUrl = found.url;
+      // 列表没翻完（预算/页数到了）：回滚到 running，等下一轮接着翻。
+      updateJob(job.id, {
+        status: "running",
+        stage: "running",
+        stageDetail: (disc.error || "还没在输出列表里找到结果图，等下一轮再找").slice(0, 200),
+        downloadStartedAt: null,
+      });
+      await saveJobs();
+      return;
     }
+    remoteName = disc.png?.fileName ?? disc.webp?.fileName ?? pngName;
+    const downloadUrl = disc.png?.url ?? null;
 
     // WebP 优先（2026-11-16）：先下 1.25MB 的 WebP，存好就先完成任务、让图显示出来；
     // 12MB 的 PNG 放后台慢慢下，存好后再把主图换成 PNG（原图）。这样“下载回存”这一步
     // 从几分钟压到十几秒。WebP 下不到就走老路（先下 PNG 再下 WebP）。
-    const pngName = job.imageFileName;
-    const webpName = String(pngName).replace(/\.png$/i, ".webp");
-    let webpUrl = null;
-    try {
-      const foundWebp = await client.findOutputFile(job.kaggleRef, webpName, { budgetMs: FIND_BUDGET_MS });
-      if (foundWebp.ok && foundWebp.url) webpUrl = foundWebp.url;
-    } catch {
-      webpUrl = null;
-    }
+    const webpUrl = disc.webp?.url ?? null;
     if (webpUrl) {
       try {
         const webpBytes = await client.downloadWebp(webpUrl);
@@ -2104,6 +2179,7 @@ async function finishJob(job, url = null) {
           imagePath: webpUri.uri,
           webpFileName: webpName,
           downloadStartedAt: null,
+          downloadStuck: null,
         });
         await saveJobs();
         notifyJob(job, true);
@@ -2111,8 +2187,24 @@ async function finishJob(job, url = null) {
         // PNG 放后台下，存好后把主图换成 PNG 原图；下不到就留着 WebP 当主图。
         downloadPngInBackground(job, downloadUrl, pngName).catch(() => {});
         return;
-      } catch {
-        // WebP 下不到：走老路（先下 PNG）
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (isNetworkErrorText(msg)) {
+          setNetworkDown(true);
+          updateJob(job.id, {
+            status: "downloading",
+            stage: "downloading",
+            stageDetail: "网络暂时断开，正在重连…（图已在云端，恢复后继续下载）",
+          });
+          await saveJobs();
+          return;
+        }
+        // 只有 WebP、WebP 又下不到（404/内容不对）：记成卡住，别死循环
+        if (!downloadUrl && isMissingDownloadError(msg)) {
+          await markDownloadStuck(job, remoteName, msg);
+          return;
+        }
+        // 否则走老路（先下 PNG）
       }
     }
 
@@ -2123,16 +2215,14 @@ async function finishJob(job, url = null) {
     let contentType = "image/png";
     let finalFileName = pngName;
     try {
+      if (!downloadUrl) throw new KaggleError("内核输出里没有成品 PNG");
       bytes = await client.downloadPng(downloadUrl);
     } catch (pngErr) {
-      let foundWebp = null;
-      try {
-        foundWebp = await client.findOutputFile(job.kaggleRef, webpName, { budgetMs: FIND_BUDGET_MS });
-      } catch {
-        foundWebp = null;
-      }
-      if (!foundWebp?.ok || !foundWebp.url) throw pngErr;
-      bytes = await client.downloadWebp(foundWebp.url);
+      const pngMsg = pngErr instanceof Error ? pngErr.message : String(pngErr);
+      // PNG 下不到（404/太大被拒）：改下发现时已找到的同号 WebP 兜底；
+      // 网络断开不兜底（WebP 也下不到），把原错抛给外层走重连那条路。
+      if (isNetworkErrorText(pngMsg) || !disc.webp?.url) throw pngErr;
+      bytes = await client.downloadWebp(disc.webp.url);
       contentType = "image/webp";
       finalFileName = webpName;
     }
@@ -2152,19 +2242,16 @@ async function finishJob(job, url = null) {
     // WebP 下不到不影响出图（PNG 已存好），推送时没 WebP 就回退推 PNG。
     // 主图本身就是 WebP 时跳过（不用再下一次）。
     let webpFileName = null;
-    if (contentType === "image/png") {
+    if (contentType === "image/png" && disc.webp?.url) {
       try {
-        const foundWebp = await client.findOutputFile(job.kaggleRef, webpName, { budgetMs: FIND_BUDGET_MS });
-        if (foundWebp.ok && foundWebp.url) {
-          const webpBytes = await client.downloadWebp(foundWebp.url);
-          await Filesystem.writeFile({
-            path: `images/${webpName}`,
-            data: bytesToBase64(webpBytes),
-            directory: Directory.Data,
-            recursive: true,
-          });
-          webpFileName = webpName;
-        }
+        const webpBytes = await client.downloadWebp(disc.webp.url);
+        await Filesystem.writeFile({
+          path: `images/${webpName}`,
+          data: bytesToBase64(webpBytes),
+          directory: Directory.Data,
+          recursive: true,
+        });
+        webpFileName = webpName;
       } catch {
         webpFileName = null;
       }
@@ -2183,6 +2270,7 @@ async function finishJob(job, url = null) {
       imagePath: uri.uri,
       webpFileName,
       downloadStartedAt: null,
+      downloadStuck: null,
     });
     await saveJobs();
     notifyJob(job, true);
@@ -2203,6 +2291,13 @@ async function finishJob(job, url = null) {
         stageDetail: "网络暂时断开，正在重连…（图已在云端，恢复后继续下载）",
       });
       await saveJobs();
+      return;
+    }
+    // 下载 404/内容不对：文件在云端不存在或不对，等一等也不会好——
+    // 记成卡住并给用户一句人话（含云端实际文件名），别在“下载中”和
+    // “没找到”之间死循环；用户点「重新取回」再真正重试。
+    if (isMissingDownloadError(msg)) {
+      await markDownloadStuck(job, remoteName, msg);
       return;
     }
     // 下载失败先留在 downloading，下一轮再试；超过 10 分钟才判失败
@@ -2346,6 +2441,9 @@ async function tick() {
       }
 
       if (job.status === "downloading") {
+        // 下载卡住了（404/内容不对）：等用户点「重新取回」，轮询不再自动重试，
+        // 10 分钟上限也不判它（用户可能几小时后才点）。
+        if (job.downloadStuck) continue;
         if (job.downloadStartedAt && now - job.downloadStartedAt > DOWNLOAD_BACKSTOP_MS) {
           await failJob(job, "下载回存重试超过 10 分钟仍没成功，已自动结束。可以点「重新提交」再试。");
           continue;
@@ -2414,8 +2512,8 @@ async function tick() {
         await saveJobs();
         // 排队/运行超过 20 分钟：状态接口可能不报完成，探输出列表兜底
         if (stageAge > RECONCILE_AFTER_MS) {
-          const url = await probeOutput(job, client);
-          if (url) await finishJob(job, url);
+          const disc = await probeOutput(job, client);
+          if (disc?.png?.url || disc?.webp?.url) await finishJob(job, disc);
         }
         continue;
       }
@@ -2433,8 +2531,8 @@ async function tick() {
         stageDetail: storedNote ? `${unknownText} ${storedNote}` : unknownText,
       });
       await saveJobs();
-      const url = await probeOutput(job, client);
-      if (url) await finishJob(job, url);
+      const disc = await probeOutput(job, client);
+      if (disc?.png?.url || disc?.webp?.url) await finishJob(job, disc);
     } catch (e) {
       // 单个任务的轮询异常不能打断整轮；下一次轮询再试
       const current = jobs.find((j) => j.id === job.id);

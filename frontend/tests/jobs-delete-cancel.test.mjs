@@ -57,7 +57,7 @@ const fake = {
   failCalls: [], // { id, headers, body, stillListed }
   kernelStatus: "queued", // 全局覆盖："queued" 时按 kernelBySlug 逐单返回；其他值全局生效
   kernelBySlug: {}, // kernelSlug -> "queued" | "running" | "complete" | "error"
-  outputFiles: [], // ListKernelSessionOutput 返回的文件 [{ fileName, url }]
+  outputBySlug: {}, // ListKernelSessionOutput 按 kernel 分：kernelSlug -> [{ fileName, url }]（生产上列表本来就是按 kernel 的，不能所有 kernel 共用一份）
   colabJobs: {}, // colabJobId -> { status, progress, stage, error }，缺省排队中
   galleryCalls: [], // 推公开画廊的调用（应一直是空的：删任务不自动推画廊）
 };
@@ -117,7 +117,8 @@ globalThis.fetch = async (url, opts) => {
     return jsonRes(200, { status: "QUEUED" });
   }
   if (u.includes("ListKernelSessionOutput")) {
-    return jsonRes(200, { files: fake.outputFiles, nextPageToken: null });
+    const body = JSON.parse(opts?.body || "{}");
+    return jsonRes(200, { files: fake.outputBySlug[body.kernelSlug] ?? [], nextPageToken: null });
   }
   if (u.includes("kernels/list")) {
     return jsonRes(200, []);
@@ -159,7 +160,7 @@ function resetFake() {
     "app-moss-comfyui-kaggle-201": "running",
     "app-moss-comfyui-kaggle-214": "running",
   };
-  fake.outputFiles = [];
+  fake.outputBySlug = {};
   // 平台侧的真实状态：203/207 跑着、211 排队中（与种子任务的本地状态一致）
   fake.colabJobs = {
     "cb-del-203": { id: "cb-del-203", status: "running", progress: 40, stage: "生成中" },
@@ -357,8 +358,11 @@ test("后台跟踪：Kaggle 跑完取图进本地图库，跟踪记录清理、�
   // 201 的跟踪还在（前面删 running 单时留下的）
   const orphan = getOrphans().find((o) => o.id === 201);
   assert.ok(orphan, "201 的后台跟踪还在");
-  fake.kernelStatus = "complete";
-  fake.outputFiles = [{ fileName: orphan.imageFileName, url: "https://www.kaggleusercontent.com/test/moss_201.png" }];
+  // 只让 201 的 kernel 报 complete（别全局设 complete，否则列表里还在跑的 214 也会被当成跑完）
+  fake.kernelBySlug["app-moss-comfyui-kaggle-201"] = "complete";
+  fake.outputBySlug = {
+    "app-moss-comfyui-kaggle-201": [{ fileName: orphan.imageFileName, url: "https://www.kaggleusercontent.com/test/moss_201.png" }],
+  };
   await __tickForTest();
   const done = getJobs().find((j) => j.id === 201);
   assert.ok(done, "跑完的图插回任务列表（进本地图库）");
@@ -371,8 +375,7 @@ test("后台跟踪：Kaggle 跑完取图进本地图库，跟踪记录清理、�
   assert.equal(getOrphans().some((o) => o.id === 201), false, "取图完成后跟踪记录清理");
   assert.equal(JSON.parse(__readStore("tianya-imagegen-orphans") || "[]").some((o) => o.id === 201), false, "Preferences 里的跟踪记录也清了");
   assert.equal(fake.galleryCalls.length, 0, "整个过程没碰公开画廊");
-  fake.kernelStatus = "queued";
-  fake.outputFiles = [];
+  fake.outputBySlug = {};
 });
 
 test("后台跟踪：Colab 跑完取图进本地图库，跟踪记录清理", async () => {
