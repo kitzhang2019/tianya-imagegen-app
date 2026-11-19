@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   MOSS_SIZES,
+  QWEN_SIZES,
+  RATIO_KEYS,
   SEEDVR_DATASET,
   collectDatasetSources,
   normalizeUseUpscale,
@@ -318,8 +320,20 @@ test("ratioOptionLabel：比例选项后面括号里写原始尺寸（底图）�
   assert.equal(ratioOptionLabel("moss", "r9x16v"), "9:16竖 (1280×2272)");
   assert.equal(ratioOptionLabel("moss", "r1x1"), "1:1 (1280×1280)");
   // 非 MOSS 模型走 QWEN_SIZES 表，尺寸跟着换，同样写底图
-  // （2026-11-16：Qwen/Krea2/Z-Image 底图短边提到 1024，2:3 底图 1024×1536）
-  assert.equal(ratioOptionLabel("qwen", "r2x3v"), "2:3竖 (1024×1536)");
-  assert.equal(ratioOptionLabel("krea2", "r2x3v"), "2:3竖 (1024×1536)");
-  assert.equal(ratioOptionLabel("zimage", "r2x3v"), "2:3竖 (1024×1536)");
+  // （2026-11-19：四模型底图统一 1280，2:3 底图 1280×1920）
+  assert.equal(ratioOptionLabel("qwen", "r2x3v"), "2:3竖 (1280×1920)");
+  assert.equal(ratioOptionLabel("krea2", "r2x3v"), "2:3竖 (1280×1920)");
+  assert.equal(ratioOptionLabel("zimage", "r2x3v"), "2:3竖 (1280×1920)");
+});
+
+test("底图统一（2026-11-19，用户定）：四模型底图短边都是 1280，QWEN_SIZES 与 MOSS_SIZES 整表一致", () => {
+  assert.deepEqual(QWEN_SIZES, MOSS_SIZES, "Qwen/Krea2/Z-Image 共用表须与 MOSS 表完全一致");
+  for (const model of MODELS) {
+    for (const key of RATIO_KEYS) {
+      const final = resolveSize(model, key, "");
+      assert.equal(Math.min(final.width, final.height), 2560, `${model} ${key} 最终短边应为 2560`);
+      const base = upscaleOffSize(final.width, final.height);
+      assert.equal(Math.min(base.width, base.height), 1280, `${model} ${key} 底图短边应为 1280`);
+    }
+  }
 });

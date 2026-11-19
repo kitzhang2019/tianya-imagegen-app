@@ -43,25 +43,24 @@ export const MOSS_SIZES = {
   r4x5v: { width: 2560, height: 3200 },
 };
 
-// Qwen / Krea2 / Z-Image 共用尺寸表（2026-11-16，与管理站对齐）。
-// 最终尺寸 = 底图 × 2（SeedVR 2x），底图短边 1024、最终短边 2048；
-// 长边按方向比例、取到 32 的倍数（最终边长能被 32 整除，则底图边长能被
-// 16 整除，latent 要求即满足）。2:3 为 2048×3072（底图 1024×1536）。
-// 旧表 2:3 最终 1760×2624（底图 880×1312），比管理站的 1024×1536 小
-// 27%，和当初 MOSS 底图小导致偏 3D 是同一毛病，见 2026-11-16 对比。
+// Qwen / Krea2 / Z-Image 共用尺寸表（2026-11-19，用户定：四模型底图统一 1280）。
+// 与 MOSS_SIZES 完全一致：最终尺寸 = 底图 × 2（SeedVR 2x），底图短边 1280、
+// 最终短边 2560；长边按方向比例、取到 32 的倍数（最终边长能被 32 整除，
+// 则底图边长能被 16 整除，latent 要求即满足）。2:3 为 2560×3840
+// （底图 1280×1920）。旧表底图短边 1024、2:3 最终 2048×3072。
 export const QWEN_SIZES = {
-  r16x9h: { width: 3680, height: 2048 },
-  r9x16v: { width: 2048, height: 3680 },
-  r4x3h: { width: 2720, height: 2048 },
-  r3x4v: { width: 2048, height: 2720 },
-  r1x1: { width: 2048, height: 2048 },
-  r3x2h: { width: 3072, height: 2048 },
-  r2x3v: { width: 2048, height: 3072 },
-  r21x9: { width: 4800, height: 2048 },
-  r2x1h: { width: 4928, height: 2048 },
-  r1x2v: { width: 2048, height: 4928 },
-  r5x4h: { width: 2560, height: 2048 },
-  r4x5v: { width: 2048, height: 2560 },
+  r16x9h: { width: 4544, height: 2560 },
+  r9x16v: { width: 2560, height: 4544 },
+  r4x3h: { width: 3424, height: 2560 },
+  r3x4v: { width: 2560, height: 3424 },
+  r1x1: { width: 2560, height: 2560 },
+  r3x2h: { width: 3840, height: 2560 },
+  r2x3v: { width: 2560, height: 3840 },
+  r21x9: { width: 5984, height: 2560 },
+  r2x1h: { width: 5120, height: 2560 },
+  r1x2v: { width: 2560, height: 5120 },
+  r5x4h: { width: 3200, height: 2560 },
+  r4x5v: { width: 2560, height: 3200 },
 };
 
 export const RATIO_KEYS = [
@@ -225,9 +224,9 @@ export const ZIMAGE_MAIN_DATASET = "kitzhang2019/pornmaster-zimage-v35-fp8";
 export const SEEDVR_DATASET = "kitzhang2019/seedvr2-7b";
 
 // --- 超分开关（2026-11-15，用户定：默认开）---
-// 开：MOSS 底图 1280×1920、Qwen/Krea2/Z-Image 底图短边 1024（2:3 为
-// 1024×1536），再 + SeedVR 7B → 最终尺寸；关：跳过 SeedVR 段，底图直接当
-// 成品出 WebP，不挂 seedvr2-7b 数据集。老任务没有 useUpscale 字段时按开处理。
+// 开：四模型底图短边都是 1280（2:3 为 1280×1920），再 + SeedVR 7B → 最终尺寸；
+// 关：跳过 SeedVR 段，底图直接当成品出 WebP，不挂 seedvr2-7b 数据集。
+// 老任务没有 useUpscale 字段时按开处理。
 export function normalizeUseUpscale(value) {
   return value !== false;
 }
