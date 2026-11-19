@@ -103,6 +103,7 @@ app.innerHTML = `
         <div id="upscale-box" class="lora-box"></div>
       </div>
       <button id="btn-submit" class="primary-btn">开始生成</button>
+      <p class="hint">优先使用 Kaggle，如果 Kaggle 出故障了，使用 Colab 生成。</p>
       <p id="form-error" class="error" hidden></p>
     </div>
   </section>

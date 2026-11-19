@@ -76,3 +76,14 @@ test("后端选择器：模型那一行左边两颗椭圆形药丸按钮（Kaggl
   assert.match(mainJs, /id="set-relay-key"/);
   assert.match(mainJs, /relayKey/);
 });
+
+test("开始生成按钮下方有后端使用说明：优先 Kaggle，出故障才用 Colab（不写自动切换）", () => {
+  // 说明紧跟在开始生成按钮之后，用已有的 hint 小字样式
+  assert.match(
+    mainJs,
+    /id="btn-submit"[^>]*>开始生成<\/button>\s*<p class="hint">优先使用 Kaggle，如果 Kaggle 出故障了，使用 Colab 生成。<\/p>/s,
+  );
+  // 没有自动切换功能，说明里不许出现“自动切换/自动切”
+  assert.doesNotMatch(mainJs, /自动切换/);
+  assert.doesNotMatch(mainJs, /自动切/);
+});
