@@ -41,6 +41,14 @@ export function isNetworkErrorText(text) {
   return /连不上|Failed to fetch|NetworkError|Network request failed|abort|timeout|timed out|ECONN|ENOTFOUND|EAI_AGAIN|offline|网络/i.test(s);
 }
 
+/** 是不是 Kaggle 队列满的拒绝。实测文案（#102–#104 提交时 Kaggle 直接拒掉）：
+ * 报错原文 "Maximum batch GPU session count of 2 reached"，App 侧经
+ * kaggleErrorDetail 包一层后仍含这句原文。按原文子串匹配、不认状态码：
+ * 同一个 403 也可能是手机号验证，只有这句原文能确定是队列满。 */
+export function isKaggleQueueFullErrorText(text) {
+  return /maximum batch gpu session count/i.test(String(text || ""));
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

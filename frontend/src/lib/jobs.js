@@ -24,7 +24,7 @@ import {
   randomSeed,
   resolveSize,
 } from "./notebook.js";
-import { KaggleClient, KaggleError, isNetworkErrorText, normalizeKaggleRef } from "./kaggle.js";
+import { KaggleClient, KaggleError, isKaggleQueueFullErrorText, isNetworkErrorText, normalizeKaggleRef } from "./kaggle.js";
 import { ColabClient, ColabError } from "./colab.js";
 import { DEFAULT_GALLERY_URL, pushToGallery } from "./gallery.js";
 
@@ -529,6 +529,9 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
     kaggleRef: null,
     // 后端随任务持久化：重提/重新生成按原后端重放，任务列表显示每单走的后端。
     backend: normalizedBackend,
+    // Kaggle 队列满自动切 Colab 的认领标记：只切一次（切过就不再切）。
+    // 老任务没有这个字段时按没切过处理。
+    autoSwitchedToColab: false,
     colabJobId: null, // Colab 中转的任务号（cb-…），Kaggle 单恒为 null
     colabProgress: null, // 中转上报的生成进度（0–100），仅 Colab 单用
     // 固定 slug：提交时就按任务 id 定死、存进任务，重推复用同一个 slug，
@@ -1046,7 +1049,13 @@ async function runColabJob(job) {
   try {
     requireCreds("colab");
     const client = makeColabClient();
-    updateJob(job.id, { status: "preparing", stage: "preparing", stageDetail: "正在提交到 Colab 中转…" });
+    updateJob(job.id, {
+      status: "preparing",
+      stage: "preparing",
+      stageDetail: job.autoSwitchedToColab
+        ? "Kaggle 队列已满，已自动切换到 Colab 生成，正在提交…"
+        : "正在提交到 Colab 中转…",
+    });
     await saveJobs();
     let submitted;
     try {
@@ -1078,7 +1087,9 @@ async function runColabJob(job) {
       colabJobId: submitted.jobId,
       status: "queued",
       stage: "queued",
-      stageDetail: "已提交到 Colab 中转，排队中",
+      stageDetail: job.autoSwitchedToColab
+        ? "Kaggle 队列已满，已自动切换到 Colab 生成 · Colab：排队中"
+        : "已提交到 Colab 中转，排队中",
       pushedAt: Date.now(),
     });
     await saveJobs();
@@ -1091,6 +1102,37 @@ async function runColabJob(job) {
     busyJobs.delete(job.id);
     pumpQueue();
   }
+}
+
+/** Kaggle 队列满被拒时，同一单自动改走 Colab（只切一次）。
+ * 调用方保证：错误已确认为队列满、任务未终态、尚未切过。
+ * Colab 中转密钥未配时不切，任务按原样失败并给一句人话。 */
+async function tryAutoSwitchToColab(job) {
+  const current = jobs.find((j) => j.id === job.id);
+  if (!current || isTerminal(current) || current.autoSwitchedToColab) return false;
+  if (!settings.relayKey) {
+    await failJob(
+      job,
+      "Kaggle 队列已满，本想自动切换到 Colab 生成，但还没配 Colab 中转密钥：请到设置里填好 Colab 中转密钥，或等 Kaggle 空出位置后再提交。",
+    );
+    return false;
+  }
+  // 同一单改走 Colab：任务 id、提示词、种子、模型、LoRA 选择、超分开关
+  // 全原样保留，只改后端与认领标记；kaggleRef 本来就是 null（push 被拒
+  // 在前，ref 还没建出来），kaggleSlug 留着备查。
+  updateJob(job.id, {
+    backend: "colab",
+    autoSwitchedToColab: true,
+    status: "preparing",
+    stage: "preparing",
+    stageDetail: "Kaggle 队列已满，已自动切换到 Colab 生成",
+  });
+  await saveJobs();
+  // runJob 的 finally 还会再删一次 busyJobs、再 pump 一次，都是幂等的；
+  // 先删掉本单的忙标记，runColabJob 才能接手。
+  busyJobs.delete(job.id);
+  await runColabJob(jobs.find((j) => j.id === job.id) || job);
+  return true;
 }
 
 /** 一单的提交流程：改 notebook ->（MOSS 先验数据集）-> push -> 核实 kernel。
@@ -1247,6 +1289,10 @@ async function runJob(job) {
           stageDetail: `网络暂时断开，正在重连…（已提交的任务不会重复推；${msg.slice(0, 120)}）`,
         });
         await saveJobs();
+      } else if (isKaggleQueueFullErrorText(msg) && !current.autoSwitchedToColab) {
+        // Kaggle 队列满被拒：同一单自动改走 Colab（只切一次；密钥未配时
+        // tryAutoSwitchToColab 内部按原样失败并给人话报错）
+        await tryAutoSwitchToColab(job);
       } else {
         await failJob(job, msg);
       }
@@ -1731,10 +1777,12 @@ async function tickColabJob(job) {
   }
   if (status === "queued" || status === "running") {
     const stageText = String(remote.stage || (status === "running" ? "生成中" : "排队中"));
+    // 切过来的单：进度里一直带着切换说明，用户才知道这单为什么在 Colab 上
+    const switchPrefix = job.autoSwitchedToColab ? "Kaggle 队列已满，已自动切换到 Colab 生成 · " : "";
     updateJob(job.id, {
       status,
       stage: status,
-      stageDetail: progress !== null && progress > 0 ? `Colab：${stageText} · ${progress}%` : `Colab：${stageText}`,
+      stageDetail: progress !== null && progress > 0 ? `${switchPrefix}Colab：${stageText} · ${progress}%` : `${switchPrefix}Colab：${stageText}`,
       colabProgress: progress,
     });
     await saveJobs();
