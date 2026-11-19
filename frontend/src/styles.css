@@ -261,9 +261,9 @@ textarea {
   margin-top: 10px;
 }
 
-/* 平台选择（生图表单模型那一行左边）：Kaggle / Colab 两颗椭圆形药丸按钮，
- * 点亮哪颗就走哪个平台。刻意不用下面 LoRA 的圆角矩形复选框样式（用户定）。
- * .badge 本身也是药丸形，这里复用同一视觉语言：未点亮是玻璃底、点亮是渐变。 */
+/* 平台选择（生图表单模型那一行左边）：Kaggle / Colab 两颗小按钮，圆角与模型下拉框
+ * 完全相同（10px），高度、内边距、字号都比模型下拉收敛一号，放在旁边不抢眼。
+ * 点亮哪颗就走哪个平台。刻意不用下面 LoRA 的圆角矩形复选框样式（用户定）。 */
 .backend-pills {
   display: flex;
   gap: 8px;
@@ -271,13 +271,13 @@ textarea {
 }
 
 .backend-pill {
-  height: 36px;
-  padding: 0 16px;
-  border-radius: 999px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.07);
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
 }
