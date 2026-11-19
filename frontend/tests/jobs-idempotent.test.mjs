@@ -49,6 +49,7 @@ const fake = {
   list: [], // kernels/list 返回的 ref 列表
   push: "ok", // "ok" | "down"（push 请求发出去但回包丢了）
   pushCalls: [], // 记录每次真正发出的 push 的 slug
+  deleteCalls: [], // v1.2.25：删任务先调 DeleteKernel 取消云端 kernel
 };
 
 function jsonRes(status, obj) {
@@ -86,6 +87,11 @@ globalThis.fetch = async (url, opts) => {
     // 默认：只有推过才算存在（模拟 kernel 建出后状态接口才跟得上）
     if (fake.pushCalls.length > 0) return jsonRes(200, { status: "RUNNING" });
     return jsonRes(404, { error: "not found" });
+  }
+  if (u.includes("DeleteKernel")) {
+    const body = JSON.parse(opts?.body || "{}");
+    fake.deleteCalls.push(body);
+    return jsonRes(200, {});
   }
   if (u.includes("/kernels/push")) {
     if (fake.push === "down") throw new TypeError("fetch failed");

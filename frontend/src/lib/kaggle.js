@@ -341,6 +341,34 @@ export class KaggleClient {
   }
 
   /**
+   * 删 kernel：POST KernelsApiService/DeleteKernel（与管理站停 kernel 同款
+   * 接口；CancelKernelSession 实测回 403 缺权限，不要用那条路）。
+   * 中转是纯透传代理（/api/v1/* 原样转发到 kaggle.com），不用给中转加接口，
+   * 同一个 Authorization 头直接过去。404 = 平台上已经没了，当已取消处理。
+   * @returns {{alreadyGone:boolean}}
+   */
+  async deleteKernel(ref) {
+    const parts = splitKaggleRef(ref);
+    if (!parts) {
+      throw new KaggleError(`Kernel 引用格式不对（${ref}），无法取消任务`);
+    }
+    let res;
+    try {
+      res = await this._fetchJson(
+        `${KAGGLE_API_BASE}/kernels.KernelsApiService/DeleteKernel`,
+        { method: "POST", body: parts, timeoutMs: 30000 },
+      );
+    } catch (e) {
+      throw new KaggleError(`连不上 Kaggle API（取消任务）：${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (res.status === 404) return { alreadyGone: true };
+    if (res.status < 200 || res.status >= 300) {
+      throw new KaggleError(await kaggleRpcErrorDetail(res.status, res.text), res.status);
+    }
+    return { alreadyGone: false };
+  }
+
+  /**
    * 在 kernel 输出列表里找一个文件，返回签名下载 URL。
    * 分页翻到找到为止；单次尝试有时间预算与 60 页上限，翻到哪一页
    * 通过 resumeToken 交给下一次尝试接着翻，不用从头再走。

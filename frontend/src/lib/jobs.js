@@ -1018,8 +1018,51 @@ async function deleteJobFiles(job) {
   }
 }
 
+/** 删任务前先去平台上取消对应的那一单（v1.2.25，用户原话：App 里删除任务，
+ * 平台就取消相应任务）。只对还没跑完的任务发取消；done / failed 的不发。
+ * 按任务当前的后端取消：自动切换过的单（Kaggle 满了切到 Colab）只取消
+ * Colab 那边——原来那个 Kaggle 的本来就没建出来，不用去取消。
+ * @returns {{ok:true, alreadyGone?:boolean, skipped?:string}|{ok:false, error:string}}
+ * ok=true：已取消 / 平台上已没了（alreadyGone）/ 没到平台不用取消
+ * （skipped: "terminal" 已完结，"no-handle" 还没建出平台任务）；
+ * ok=false：取消失败，调用方不要删本地记录。 */
+export async function cancelRemoteJob(job) {
+  if (!job || isTerminal(job)) return { ok: true, skipped: "terminal" };
+  const backend = normalizeBackend(job.backend);
+  try {
+    if (backend === "colab") {
+      if (!job.colabJobId) return { ok: true, skipped: "no-handle" };
+      requireCreds("colab");
+      const client = makeColabClient();
+      const r = await client.failJob(job.colabJobId, "已在 App 里删除");
+      return { ok: true, alreadyGone: r.alreadyGone };
+    }
+    if (!job.kaggleRef) return { ok: true, skipped: "no-handle" };
+    requireCreds("kaggle");
+    const client = makeClient();
+    const r = await client.deleteKernel(job.kaggleRef);
+    return { ok: true, alreadyGone: r.alreadyGone };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function deleteJob(id) {
   const job = jobs.find((j) => j.id === id);
+  if (!job) return { ok: true, skipped: "not-found" };
+  // 取消走在删本地记录之前：平台上的 kernel / 中转任务先停掉，确认结果
+  // 之后再删本地。取消失败（断网、凭据不对）时任务留着：记一条看得见的
+  // 提示（任务行 + stageDetail），等联网/配好凭据后重试删除，不要像以前
+  // 那样删完本地记录就当没事了——平台上的任务还会继续占 GPU 位置。
+  const cancel = await cancelRemoteJob(job);
+  if (!cancel.ok) {
+    updateJob(job.id, {
+      cancelError: String(cancel.error).slice(0, 200),
+      stageDetail: "平台取消失败，请重试删除",
+    });
+    await saveJobs();
+    return { ok: false, error: cancel.error };
+  }
   jobs = jobs.filter((j) => j.id !== id);
   await saveJobs();
   await deleteJobFiles(job);
@@ -1034,6 +1077,7 @@ export async function deleteJob(id) {
     thumbBlobUrls.delete(id);
   }
   pumpQueue();
+  return { ok: true, alreadyGone: cancel.alreadyGone ?? false };
 }
 
 function activeCount() {

@@ -36,6 +36,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const fake = {
   status: "queued", // "queued" | "running" | "unknown"（不认识的状态值）| "down"（断网）
   outputFiles: [], // ListKernelSessionOutput 第一页返回的文件
+  deleteCalls: [], // v1.2.25：删任务先调 DeleteKernel 取消云端 kernel
 };
 
 function jsonRes(status, obj) {
@@ -49,8 +50,12 @@ function jsonRes(status, obj) {
   };
 }
 
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, opts) => {
   const u = String(url);
+  if (u.includes("DeleteKernel")) {
+    fake.deleteCalls.push(JSON.parse(opts?.body || "{}"));
+    return jsonRes(200, {});
+  }
   if (u.includes("GetKernelSessionStatus")) {
     if (fake.status === "down") throw new TypeError("fetch failed");
     if (fake.status === "running") return jsonRes(200, { status: "RUNNING" });

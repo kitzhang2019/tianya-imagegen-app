@@ -74,6 +74,7 @@ const fake = {
   jobs: new Map(), // jobId -> { status, progress, stage, error }
   postCalls: [],
   getCalls: [],
+  failCalls: [], // v1.2.25：删任务先调 POST /job/<id>/fail 取消中转任务
 };
 
 function fakeRelayJob(id) {
@@ -93,6 +94,16 @@ globalThis.fetch = async (url, opts) => {
     fake.jobs.set(id, { id, status: "queued", progress: 0, stage: "排队中", model: body.model });
     return jsonRes(200, { ok: true, job_id: id });
   }
+  const mFail = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/job/([^/]+)/fail$`));
+  if (mFail && method === "POST") {
+    fake.failCalls.push({ id: mFail[1], headers: opts?.headers || {}, body: opts?.body });
+    const job = fake.jobs.get(mFail[1]);
+    if (job) {
+      job.status = "failed";
+      job.error = "已在 App 里删除";
+    }
+    return jsonRes(200, { ok: true, job: job ?? { id: mFail[1], status: "failed" } });
+  }
   const m = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/job/([^/]+)(?:/(webp|png))?$`));
   if (m) {
     const [, id, format] = m;
@@ -111,6 +122,7 @@ function resetFake() {
   fake.jobs.clear();
   fake.postCalls = [];
   fake.getCalls = [];
+  fake.failCalls = [];
 }
 
 function seedColabJob(id, extra) {

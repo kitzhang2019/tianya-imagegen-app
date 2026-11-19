@@ -152,6 +152,32 @@ export class ColabClient {
     return job;
   }
 
+  // 取消一单：POST /job/<id>/fail，把中转里的任务标失败，守护进程不再领走
+  // 执行。404 = 中转那边已经没了这单，当已取消处理。
+  // error 文案会写进中转 job 行的 error 字段，供守护进程/排障时看。
+  async failJob(jobId, error = "已在 App 里删除") {
+    let res;
+    try {
+      res = await httpRequest({
+        url: `${COLAB_RELAY_BASE}/job/${encodeURIComponent(jobId)}/fail`,
+        method: "POST",
+        headers: this._headers({ "content-type": "application/json" }),
+        body: JSON.stringify({ error }),
+        timeoutMs: 30000,
+        responseType: "json",
+      });
+    } catch (e) {
+      throw new ColabError(
+        `连不上 Colab 中转（取消任务）：${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    if (res.status === 404) return { alreadyGone: true };
+    if (res.status < 200 || res.status >= 300) {
+      throw new ColabError(await colabErrorDetail(res.status, res.text), res.status);
+    }
+    return { alreadyGone: false };
+  }
+
   // 下载结果图。format: "webp" | "png"。下载不重试（404 只会是
   // 结果还没准备好，重下也没用；网络问题由调用方留在下载状态等下一轮）。
   async downloadImage(jobId, format) {
