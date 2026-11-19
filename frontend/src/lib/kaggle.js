@@ -137,8 +137,9 @@ async function kaggleRpcErrorDetail(status, bodyText) {
  * data：JSON 响应时为解析后的对象；text 为原始文本；bytes 仅 responseType
  * 为 arraybuffer 时有值。CapacitorHttp 在真机与浏览器里都会把 arraybuffer
  * 响应以 base64 字符串放在 data 里，这里统一解回 Uint8Array。
+ * Colab 中转也走它（见 colab.js），所以导出。
  */
-async function httpRequest({ url, method = "GET", headers = {}, body = null, timeoutMs = 30000, responseType = "text" }) {
+export async function httpRequest({ url, method = "GET", headers = {}, body = null, timeoutMs = 30000, responseType = "text" }) {
   const isNative = Capacitor.isNativePlatform();
   if (isNative) {
     const res = await CapacitorHttp.request({

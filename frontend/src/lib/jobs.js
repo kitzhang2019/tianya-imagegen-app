@@ -25,6 +25,7 @@ import {
   resolveSize,
 } from "./notebook.js";
 import { KaggleClient, KaggleError, isNetworkErrorText, normalizeKaggleRef } from "./kaggle.js";
+import { ColabClient, ColabError } from "./colab.js";
 import { DEFAULT_GALLERY_URL, pushToGallery } from "./gallery.js";
 
 const PREF_JOBS = "tianya-imagegen-jobs";
@@ -94,8 +95,10 @@ export const STAGE_LABELS = {
 };
 
 export const DEFAULT_SETTINGS = {
+  backend: "kaggle", // 生图走哪个后端："kaggle" | "colab"，默认 Kaggle
   kaggleUsername: "",
   kaggleToken: "",
+  relayKey: "", // Colab 中转密钥（X-Colab-Key），只存在手机本地，默认空
   galleryKey: "",
   galleryUrl: DEFAULT_GALLERY_URL,
   notifyOnDone: true, // 出图完成提醒（震动+提示音），默认开
@@ -252,11 +255,18 @@ async function saveJobs() {
   for (const old of dropped) await deleteJobFiles(old);
 }
 
+/** 后端归一化：只认 "colab"，其余（包括老记录的 undefined）一律走 Kaggle。 */
+export function normalizeBackend(value) {
+  return value === "colab" ? "colab" : "kaggle";
+}
+
 export async function saveSettings(next) {
   // 字段按“没传就保留旧值”合并：开关只传 { notifyOnDone } 时不能把账号 Token 清掉
   settings = {
+    backend: normalizeBackend(next.backend ?? settings.backend ?? "kaggle"),
     kaggleUsername: String(next.kaggleUsername ?? settings.kaggleUsername ?? "").trim(),
     kaggleToken: String(next.kaggleToken ?? settings.kaggleToken ?? "").trim(),
+    relayKey: String(next.relayKey ?? settings.relayKey ?? "").trim(),
     galleryKey: String(next.galleryKey ?? settings.galleryKey ?? "").trim(),
     galleryUrl: String(next.galleryUrl ?? settings.galleryUrl ?? "").trim() || DEFAULT_GALLERY_URL,
     notifyOnDone: next.notifyOnDone ?? settings.notifyOnDone ?? true,
@@ -463,18 +473,29 @@ function makeClient() {
   return new KaggleClient({ username: settings.kaggleUsername, key: settings.kaggleToken });
 }
 
-function requireCreds() {
+function requireCreds(backend = "kaggle") {
+  if (normalizeBackend(backend) === "colab") {
+    if (!settings.relayKey) {
+      throw new Error("请先在设置里填好 Colab 中转密钥，再提交生图。");
+    }
+    return;
+  }
   if (!settings.kaggleUsername || !settings.kaggleToken) {
     throw new Error("请先在设置里完成配置，再提交生图。");
   }
+}
+
+function makeColabClient() {
+  return new ColabClient({ key: settings.relayKey });
 }
 
 /** 提交一单：只建记录进本地队列，由 pumpQueue 按 2 并发启动。
  * useLora：Krea2 的 LoRA 开关（默认带）；loraKeys：MOSS 的 LoRA 选择（默认只带
  * 观澜，空数组 = 不挂）/ Z-Image 的 LoRA 选择（默认全带）。useUpscale：超分
  * 开关（默认开，false = 底图直接当成品、不挂 SeedVR 数据集）。 */
-export async function submitJob({ model, prompt, ratioKey = "auto", useLora, loraKeys, useUpscale, kaggleSlug }) {
-  requireCreds();
+export async function submitJob({ model, prompt, ratioKey = "auto", useLora, loraKeys, useUpscale, kaggleSlug, backend }) {
+  const normalizedBackend = normalizeBackend(backend ?? settings.backend);
+  requireCreds(normalizedBackend);
   const cleanPrompt = String(prompt || "").trim();
   if (!cleanPrompt) throw new Error("提示词不能为空。");
   if (cleanPrompt.length > 10000) throw new Error("提示词超过 10000 字上限。");
@@ -506,10 +527,15 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
     stage: "queued-local",
     stageDetail: "本地排队，等空闲的云端会话",
     kaggleRef: null,
+    // 后端随任务持久化：重提/重新生成按原后端重放，任务列表显示每单走的后端。
+    backend: normalizedBackend,
+    colabJobId: null, // Colab 中转的任务号（cb-…），Kaggle 单恒为 null
+    colabProgress: null, // 中转上报的生成进度（0–100），仅 Colab 单用
     // 固定 slug：提交时就按任务 id 定死、存进任务，重推复用同一个 slug，
     // 绝不每次尝试现算新 slug。带 app- 前缀，与管理站的同名 kernel 区分开
     // （两边任务号各自计数，撞车会互相覆盖对方的 kernel）。
-    kaggleSlug: kaggleSlug || appKernelSlug(model, id),
+    // Colab 单没有 slug，记 null。
+    kaggleSlug: normalizedBackend === "colab" ? null : kaggleSlug || appKernelSlug(model, id),
     createdAt: Date.now(),
     pushedAt: null,
     verifyDeadlineAt: null,
@@ -544,6 +570,7 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
 export async function retryJob(id) {
   const old = jobs.find((j) => j.id === id);
   if (!old) throw new Error("找不到这条任务");
+  if (normalizeBackend(old.backend) === "colab") return retryColabJob(old);
   requireCreds();
   const slug = old.kaggleSlug || appKernelSlug(old.model, old.id);
   const ref = `${settings.kaggleUsername}/${slug}`;
@@ -575,6 +602,69 @@ export async function retryJob(id) {
   return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale, kaggleSlug: slug });
 }
 
+/** Colab 单的失败任务重提：先按 colabJobId 查中转——
+ *  - 中转那边还在跑/排队：直接恢复旧任务轮询，不建新任务、不再提交
+ *    （防重复提交）；
+ *  - 中转那边已跑完：恢复旧任务，下一轮轮询直接取图；
+ *  - 中转那边失败了 / 没这单了：新开一单（新任务号、新种子），走 Colab；
+ *  - 网络还没恢复、查不到：不建新任务，直接报错，等网络恢复后再点。
+ * 没有 colabJobId（提交时回包丢了、核对不了）：直接新开一单。 */
+async function retryColabJob(old) {
+  requireCreds("colab");
+  const resubmit = () =>
+    submitJob({
+      model: old.model,
+      prompt: old.prompt,
+      ratioKey: old.ratioKey || "auto",
+      useLora: old.useLora,
+      loraKeys: old.loraKeys,
+      useUpscale: old.useUpscale,
+      backend: "colab",
+    });
+  if (!old.colabJobId) return resubmit();
+  const client = makeColabClient();
+  let remote;
+  try {
+    remote = await client.getJob(old.colabJobId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (e instanceof ColabError && e.status === 401) throw new Error(msg);
+    if (e instanceof ColabError && e.status === 404) return resubmit();
+    if (isNetworkErrorText(msg)) {
+      setNetworkDown(true);
+      throw new Error("网络还没恢复，无法确认中转那边这单的状态，稍后再点重新提交。");
+    }
+    throw new Error(msg);
+  }
+  if (remote.status === "queued" || remote.status === "running") {
+    setNetworkDown(false);
+    updateJob(old.id, {
+      status: remote.status,
+      stage: remote.status,
+      stageDetail: `Colab：${remote.stage || (remote.status === "running" ? "生成中" : "排队中")}`,
+      error: null,
+      finishedAt: null,
+      downloadStartedAt: null,
+    });
+    await saveJobs();
+    return old;
+  }
+  if (remote.status === "done") {
+    setNetworkDown(false);
+    updateJob(old.id, {
+      status: "running",
+      stage: "running",
+      stageDetail: "中转已跑完，正在取图",
+      error: null,
+      finishedAt: null,
+      downloadStartedAt: null,
+    });
+    await saveJobs();
+    return old;
+  }
+  return resubmit();
+}
+
 /** 手动重新取回：下载卡住（网络断开、图已在云端）时点一下，立刻再试一次
  * 下载，不重新生成、不换种子。重置 10 分钟下载上限的时钟：手动重取是一次
  * 新的尝试，不该因为之前卡了 9 分钟就 1 分钟后被判失败。 */
@@ -584,6 +674,21 @@ export async function refetchJob(id) {
   if (job.status === "done") throw new Error("这张图已经下好了，不用重新取回");
   if (job.status === "failed") throw new Error("这单已经失败了，请点「重新提交」再试");
   if (job.status !== "downloading" && job.status !== "running") throw new Error("这单还没到下载这一步，稍后再试");
+  if (normalizeBackend(job.backend) === "colab") {
+    if (!job.colabJobId) throw new Error("中转还没有这单，暂时取不回来");
+    if (busyJobs.has(job.id)) throw new Error("正在下载，稍等一下");
+    requireCreds("colab");
+    updateJob(job.id, {
+      status: "downloading",
+      stage: "downloading",
+      stageDetail: "正在重新取回结果图…",
+      downloadStartedAt: null,
+      error: null,
+    });
+    await saveJobs();
+    await finishColabJob(job);
+    return jobs.find((j) => j.id === job.id) || job;
+  }
   if (!job.kaggleRef) throw new Error("云端还没有这单，暂时取不回来");
   if (busyJobs.has(job.id)) throw new Error("正在下载，稍等一下");
   requireCreds();
@@ -604,7 +709,7 @@ export async function regenerateJob(id) {
   const old = jobs.find((j) => j.id === id);
   if (!old) throw new Error("找不到这张图");
   if (old.status !== "done") throw new Error("这张图还没完成，不能重新生成");
-  const job = await submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale });
+  const job = await submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale, backend: normalizeBackend(old.backend) });
   job.regeneratedFrom = old.id;
   old.regeneratedBy = job.id;
   await saveJobs();
@@ -728,6 +833,11 @@ export function getJobProgress(job) {
     case "queued":
       return { pct: 25, label };
     case "running": {
+      // Colab 单：中转直接上报生成进度（0–100），进度环按它走，不按耗时估算。
+      if (normalizeBackend(job.backend) === "colab") {
+        const p = typeof job.colabProgress === "number" ? Math.max(0, Math.min(100, job.colabProgress)) : 0;
+        return { pct: Math.round(30 + (p / 100) * 58), label };
+      }
       const since = job.stageStartedAt || job.createdAt || Date.now();
       const est = estimateGenerateMs(job.model, job.width, job.height);
       const frac = Math.min(1, Math.max(0, (Date.now() - since) / est));
@@ -924,8 +1034,69 @@ async function verifyKernel(job, client) {
   }
 }
 
-/** 一单的提交流程：改 notebook ->（MOSS 先验数据集）-> push -> 核实 kernel。 */
+/** Colab 单的提交流程：直接 POST /job 到中转，拿到 job id 后进排队轮询。
+ * 提交回包丢了（网络断开）时：中转那边可能已建出任务，但 App 没有任务号、
+ * 对不上——不标失败、不盲目重推，进“待确认”，5 分钟后仍未确认就判失败
+ * （与 Kaggle 的 confirmKernelExists 核实思路同款，只是 Colab 没有
+ * “按 slug 查云端”这条路，所以确认不了、只能等用户重新提交）。
+ * 密钥不对（401）是明确拒绝，直接判失败并告诉用户去设置里核对密钥。 */
+async function runColabJob(job) {
+  if (busyJobs.has(job.id)) return;
+  busyJobs.add(job.id);
+  try {
+    requireCreds("colab");
+    const client = makeColabClient();
+    updateJob(job.id, { status: "preparing", stage: "preparing", stageDetail: "正在提交到 Colab 中转…" });
+    await saveJobs();
+    let submitted;
+    try {
+      submitted = await client.submitJob({
+        model: job.model,
+        prompt: job.prompt,
+        ratioKey: job.ratioKey || "auto",
+        seed: job.seed,
+        loraKeys: job.loraKeys,
+        useLora: job.useLora,
+        useUpscale: job.useUpscale,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (isNetworkErrorText(msg)) {
+        setNetworkDown(true);
+        updateJob(job.id, {
+          status: "preparing",
+          stage: "confirming",
+          verifyDeadlineAt: Date.now() + VERIFY_WINDOW_MS,
+          stageDetail: `网络暂时断开，正在重连…（提交结果未确认，中转那边可能已建出任务，App 没有任务号、对不上；${msg.slice(0, 120)}）`,
+        });
+        await saveJobs();
+        return;
+      }
+      throw e;
+    }
+    updateJob(job.id, {
+      colabJobId: submitted.jobId,
+      status: "queued",
+      stage: "queued",
+      stageDetail: "已提交到 Colab 中转，排队中",
+      pushedAt: Date.now(),
+    });
+    await saveJobs();
+  } catch (e) {
+    const current = jobs.find((j) => j.id === job.id);
+    if (current && !isTerminal(current)) {
+      await failJob(job, e instanceof Error ? e.message : String(e));
+    }
+  } finally {
+    busyJobs.delete(job.id);
+    pumpQueue();
+  }
+}
+
+/** 一单的提交流程：改 notebook ->（MOSS 先验数据集）-> push -> 核实 kernel。
+ * Colab 单不走这条路，见 runColabJob。 */
 async function runJob(job) {
+  if (normalizeBackend(job.backend) === "colab") return runColabJob(job);
   if (busyJobs.has(job.id)) return;
   busyJobs.add(job.id);
   try {
@@ -1132,6 +1303,197 @@ async function downloadPngInBackground(job, pngUrl, pngName) {
   }
 }
 
+async function downloadColabPngInBackground(job, pngName) {
+  try {
+    const client = makeColabClient();
+    const bytes = await client.downloadImage(job.colabJobId, "png");
+    await Filesystem.writeFile({
+      path: `images/${pngName}`,
+      data: bytesToBase64(bytes),
+      directory: Directory.Data,
+      recursive: true,
+    });
+    const uri = await Filesystem.getUri({ path: `images/${pngName}`, directory: Directory.Data });
+    blobUrls.set(job.id, URL.createObjectURL(new Blob([bytes], { type: "image/png" })));
+    const current = jobs.find((j) => j.id === job.id);
+    if (!current || current.status !== "done") return;
+    updateJob(job.id, { imageFileName: pngName, imagePath: uri.uri });
+    await saveJobs();
+  } catch {
+    // PNG 下不到：留着 WebP 当主图，不报错
+  }
+}
+
+/** Colab 单的下载回存：中转已跑完，GET /job/<id>/webp|png 直下结果图。
+ * 同样 WebP 优先：先下 WebP 存好就先完成任务，PNG 放后台慢慢下。 */
+async function finishColabJob(job) {
+  if (busyJobs.has(job.id)) return;
+  busyJobs.add(job.id);
+  const client = makeColabClient();
+  try {
+    // downloadStartedAt 只在第一次进下载时记，之后重试不再重置——10 分钟上限
+    // 算的是总重试时长（与 finishJob 同款）。
+    const started = jobs.find((j) => j.id === job.id) || job;
+    updateJob(job.id, {
+      status: "downloading",
+      stage: "downloading",
+      stageDetail: "正在从 Colab 中转下载结果图…",
+      downloadStartedAt: started.downloadStartedAt || Date.now(),
+    });
+    await saveJobs();
+
+    const pngName = job.imageFileName;
+    const webpName = String(pngName).replace(/\.png$/i, ".webp");
+    // WebP 优先（与 finishJob 同款）：先下 WebP，存好就先完成任务、让图显示
+    // 出来；PNG 放后台慢慢下，存好后再把主图换成 PNG（原图）。
+    try {
+      const webpBytes = await client.downloadImage(job.colabJobId, "webp");
+      await Filesystem.writeFile({
+        path: `images/${webpName}`,
+        data: bytesToBase64(webpBytes),
+        directory: Directory.Data,
+        recursive: true,
+      });
+      const webpUri = await Filesystem.getUri({ path: `images/${webpName}`, directory: Directory.Data });
+      blobUrls.set(job.id, URL.createObjectURL(new Blob([webpBytes], { type: "image/webp" })));
+      const doneJob = jobs.find((j) => j.id === job.id) || job;
+      await buildThumbnail(doneJob, webpBytes, "image/webp");
+      updateJob(job.id, {
+        status: "done",
+        stage: "done",
+        stageDetail: "已完成，图片已保存",
+        finishedAt: Date.now(),
+        imageFileName: webpName,
+        imagePath: webpUri.uri,
+        webpFileName: webpName,
+        downloadStartedAt: null,
+      });
+      await saveJobs();
+      notifyJob(job, true);
+      endLiveActivity(job, true);
+      // PNG 放后台下，存好后把主图换成 PNG 原图；下不到就留着 WebP 当主图。
+      downloadColabPngInBackground(job, pngName).catch(() => {});
+      return;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // 网络断开：图已在中转，只等重连下载——不判失败，等下一轮
+      if (isNetworkErrorText(msg)) {
+        setNetworkDown(true);
+        updateJob(job.id, {
+          status: "downloading",
+          stage: "downloading",
+          stageDetail: "网络暂时断开，正在重连…（图已在中转，恢复后继续下载）",
+        });
+        await saveJobs();
+        return;
+      }
+      // 密钥不对是明确拒绝，不用等 10 分钟上限
+      if (e instanceof ColabError && e.status === 401) {
+        await failJob(job, msg);
+        return;
+      }
+      // 404（结果还没准备好）或魔数不对：走老路下 PNG；PNG 也 404 就留在
+      // downloading 等下一轮，10 分钟上限到了再判失败。
+      if (!(e instanceof ColabError && e.status === 404)) {
+        updateJob(job.id, { stageDetail: `WebP 下不到（${msg.slice(0, 80)}），改下 PNG…` });
+        await saveJobs();
+      }
+    }
+
+    // 老路：下 PNG。
+    let bytes;
+    try {
+      bytes = await client.downloadImage(job.colabJobId, "png");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (isNetworkErrorText(msg)) {
+        setNetworkDown(true);
+        updateJob(job.id, {
+          status: "downloading",
+          stage: "downloading",
+          stageDetail: "网络暂时断开，正在重连…（图已在中转，恢复后继续下载）",
+        });
+        await saveJobs();
+        return;
+      }
+      if (e instanceof ColabError && e.status === 401) {
+        await failJob(job, msg);
+        return;
+      }
+      if (e instanceof ColabError && e.status === 404) {
+        updateJob(job.id, {
+          status: "downloading",
+          stage: "downloading",
+          stageDetail: "中转说结果还没准备好，等下一轮再试",
+        });
+        await saveJobs();
+        return;
+      }
+      throw e;
+    }
+    const base64 = bytesToBase64(bytes);
+    await Filesystem.writeFile({
+      path: `images/${pngName}`,
+      data: base64,
+      directory: Directory.Data,
+      recursive: true,
+    });
+    const uri = await Filesystem.getUri({ path: `images/${pngName}`, directory: Directory.Data });
+    blobUrls.set(job.id, URL.createObjectURL(new Blob([bytes], { type: "image/png" })));
+
+    // 图库网格用的 WebP 缩略图（失败不影响出图）
+    const doneJob = jobs.find((j) => j.id === job.id) || job;
+    await buildThumbnail(doneJob, bytes, "image/png");
+
+    updateJob(job.id, {
+      status: "done",
+      stage: "done",
+      stageDetail: "已完成，图片已保存",
+      finishedAt: Date.now(),
+      imageFileName: pngName,
+      imagePath: uri.uri,
+      webpFileName: null,
+      downloadStartedAt: null,
+    });
+    await saveJobs();
+    notifyJob(job, true);
+    endLiveActivity(job, true);
+
+    // 不自动推送画廊：图只保存在本机，用户在图库里手动多选推送。
+  } catch (e) {
+    const current = jobs.find((j) => j.id === job.id);
+    if (!current || isTerminal(current)) return;
+    const msg = e instanceof Error ? e.message : String(e);
+    // 网络断开：图已在中转，只等重连下载——不判失败（也不受 10 分钟上限），
+    // 等网络恢复后下一轮继续下载
+    if (isNetworkErrorText(msg)) {
+      setNetworkDown(true);
+      updateJob(job.id, {
+        status: "downloading",
+        stage: "downloading",
+        stageDetail: "网络暂时断开，正在重连…（图已在中转，恢复后继续下载）",
+      });
+      await saveJobs();
+      return;
+    }
+    // 下载失败先留在 downloading，下一轮再试；超过 10 分钟才判失败
+    const since = current.downloadStartedAt || Date.now();
+    if (Date.now() - since > DOWNLOAD_BACKSTOP_MS) {
+      await failJob(job, msg);
+    } else {
+      updateJob(job.id, {
+        status: "downloading",
+        stage: "downloading",
+        stageDetail: `下载回存遇到问题，下一轮再试：${msg.slice(0, 120)}`,
+      });
+      await saveJobs();
+    }
+  } finally {
+    busyJobs.delete(job.id);
+    pumpQueue();
+  }
+}
+
 /** 下载回存 + 保存文件 + 画廊推送。 */
 async function finishJob(job, url = null) {
   if (busyJobs.has(job.id)) return;
@@ -1331,6 +1693,57 @@ async function finishJob(job, url = null) {
   }
 }
 
+/** Colab 单的一次轮询：GET /job/<id> 查中转的状态。
+ * done -> 取图；failed -> 判失败；queued/running -> 更新进度
+ * （中转上报的 progress 直接进进度环，见 getJobProgress）；
+ * 401/404 是明确拒绝（密钥不对 / 中转那边没这单了），判失败；
+ * 网络断开只写备注、不判失败，等下一轮。 */
+async function tickColabJob(job) {
+  const client = makeColabClient();
+  let remote;
+  try {
+    remote = await client.getJob(job.colabJobId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (e instanceof ColabError && e.status === 401) {
+      await failJob(job, msg);
+      return;
+    }
+    if (e instanceof ColabError && e.status === 404) {
+      await failJob(job, msg);
+      return;
+    }
+    setNetworkDown(true);
+    updateJob(job.id, { stageDetail: `网络暂时断开，正在重连…（${msg.slice(0, 120)}）` });
+    await saveJobs();
+    return;
+  }
+  setNetworkDown(false);
+  const status = remote.status;
+  const progress = typeof remote.progress === "number" ? Math.max(0, Math.min(100, remote.progress)) : null;
+  if (status === "done") {
+    await finishColabJob(job);
+    return;
+  }
+  if (status === "failed") {
+    await failJob(job, remote.error ? `Colab 中转：${remote.error}` : "Colab 中转返回失败（没给具体原因）。");
+    return;
+  }
+  if (status === "queued" || status === "running") {
+    const stageText = String(remote.stage || (status === "running" ? "生成中" : "排队中"));
+    updateJob(job.id, {
+      status,
+      stage: status,
+      stageDetail: progress !== null && progress > 0 ? `Colab：${stageText} · ${progress}%` : `Colab：${stageText}`,
+      colabProgress: progress,
+    });
+    await saveJobs();
+    return;
+  }
+  updateJob(job.id, { stageDetail: `中转返回了不认识的状态「${status}」，下一轮再试` });
+  await saveJobs();
+}
+
 /** 一轮轮询：每个活跃任务各查一次状态。 */
 async function tick() {
   const actives = jobs.filter(isActive);
@@ -1339,6 +1752,29 @@ async function tick() {
     const now = Date.now();
     try {
       if (job.status === "preparing") {
+        if (normalizeBackend(job.backend) === "colab") {
+          // Colab 单没有“按 slug 查云端”这条路：提交回包丢了就核对不了，
+          // 只能等 5 分钟核实窗口过后判失败、让用户重新提交；有任务号但
+          // 还在 preparing（提交成功后直接进 queued，这里只是兜底）就
+          // 当 queued 继续轮询。
+          if (!job.colabJobId) {
+            if (!job.verifyDeadlineAt) {
+              updateJob(job.id, { verifyDeadlineAt: Date.now() + VERIFY_WINDOW_MS });
+              await saveJobs();
+              continue;
+            }
+            if (now > job.verifyDeadlineAt) {
+              await failJob(
+                job,
+                "提交时网络断开，没收到中转的回包，无法确认任务是否已建出（中转那边可能已在跑，App 没有任务号、对不上）。请重新提交。",
+              );
+            }
+            continue;
+          }
+          updateJob(job.id, { status: "queued", stage: "queued", stageDetail: "已提交到 Colab 中转，排队中" });
+          await saveJobs();
+          continue;
+        }
         // 没有 kaggleRef：可能只是 push 回包丢了（代理断开）或重启中断，kernel
         // 可能已在云端——先按固定 slug 查云端，绝不直接判失败、绝不直接重推。
         if (!job.kaggleRef) {
@@ -1382,12 +1818,16 @@ async function tick() {
           await failJob(job, "下载回存重试超过 10 分钟仍没成功，已自动结束。可以点「重新提交」再试。");
           continue;
         }
+        if (normalizeBackend(job.backend) === "colab") {
+          finishColabJob(job);
+          continue;
+        }
         finishJob(job);
         continue;
       }
 
       // queued / running
-      if (!job.kaggleRef) continue;
+      if (normalizeBackend(job.backend) === "colab" ? !job.colabJobId : !job.kaggleRef) continue;
       if (now - job.createdAt > QUEUED_BACKSTOP_MS && job.status === "queued") {
         await failJob(job, "云端排队超过 6 小时仍没开始，已自动结束。可以点「重新提交」再试。");
         continue;
@@ -1396,6 +1836,10 @@ async function tick() {
       // 2 小时失败线对齐）。stageStartedAt 是进入 running 阶段的时间。
       if (job.status === "running" && now - (job.stageStartedAt || job.createdAt) > RUNNING_BACKSTOP_MS) {
         await failJob(job, "生成超过 2 小时未完成，已自动结束。可以点「重新提交」再试。");
+        continue;
+      }
+      if (normalizeBackend(job.backend) === "colab") {
+        await tickColabJob(job);
         continue;
       }
       const client = makeClient();
@@ -1520,9 +1964,14 @@ export async function initJobs() {
   await loadAll();
   // 重启后：preparing 但还没 kaggleRef 的任务不直接失败——push 回包可能丢了，
   // kernel 可能已在云端；先标成待确认，轮询时会按固定 slug 查云端再决定。
+  // Colab 单同款道理，但没有“按 slug 查云端”这条路：只标待确认，轮询
+  // 到 5 分钟窗口后判失败、让用户重新提交（见 tick 的 preparing 分支）。
   for (const job of [...jobs]) {
-    if (job.status === "preparing" && !job.kaggleRef) {
+    if (job.status === "preparing" && !job.kaggleRef && normalizeBackend(job.backend) !== "colab") {
       updateJob(job.id, { stage: "confirming", stageDetail: "应用重启，正在确认云端是否已建出任务…" });
+    }
+    if (job.status === "preparing" && normalizeBackend(job.backend) === "colab" && !job.colabJobId) {
+      updateJob(job.id, { stage: "confirming", stageDetail: "应用重启，提交结果未确认（中转那边可能已建出任务，App 没有任务号、对不上）…" });
     }
   }
   await saveJobs();

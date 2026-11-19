@@ -56,3 +56,23 @@ test("模型/比例下拉框紧凑：框高 36px，内边距与字号配合收�
   assert.match(css, /\.glass-select\s*\{[^}]*font-size:\s*14px/s);
   assert.match(css, /\.glass-select\s*\{[^}]*padding:\s*0 32px 0 12px/s);
 });
+
+test("后端选择器：模型那一行左边两颗椭圆形药丸按钮（Kaggle / Colab），不是复选框", () => {
+  // 平台按钮在模型下拉框同一行左边，右边仍是模型下拉框
+  assert.match(mainJs, /class="backend-pills"/);
+  assert.match(mainJs, /data-backend="kaggle"/);
+  assert.match(mainJs, /data-backend="colab"/);
+  assert.match(mainJs, /id="model-select"/);
+  // 药丸是 button，不是 LoRA 那种 checkbox
+  assert.doesNotMatch(mainJs, /backend-pill[^>]*type="checkbox"/);
+  assert.match(mainJs, /class="backend-pill"[^>]*data-backend="kaggle"/);
+  // 椭圆：border-radius 999px；点亮态用渐变
+  assert.match(css, /\.backend-pill\s*\{[^}]*border-radius:\s*999px/s);
+  assert.match(css, /\.backend-pill\.active\s*\{[^}]*linear-gradient/s);
+  // 任务列表显示每单走的后端
+  assert.match(mainJs, /backend-badge-colab/);
+  assert.match(mainJs, /job\.backend === "colab" \? "Colab" : "Kaggle"/);
+  // 设置里有 Colab 中转密钥项（只存本机）
+  assert.match(mainJs, /id="set-relay-key"/);
+  assert.match(mainJs, /relayKey/);
+});

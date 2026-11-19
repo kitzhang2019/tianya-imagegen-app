@@ -261,6 +261,34 @@ textarea {
   margin-top: 10px;
 }
 
+/* 平台选择（生图表单模型那一行左边）：Kaggle / Colab 两颗椭圆形药丸按钮，
+ * 点亮哪颗就走哪个平台。刻意不用下面 LoRA 的圆角矩形复选框样式（用户定）。
+ * .badge 本身也是药丸形，这里复用同一视觉语言：未点亮是玻璃底、点亮是渐变。 */
+.backend-pills {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+
+.backend-pill {
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.backend-pill.active {
+  background: linear-gradient(135deg, var(--accent1), var(--accent2) 55%, var(--accent3));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.35);
+}
+
 /* LoRA + 超分选择区：一行两个的两列网格（Z-Image 3 个 LoRA + 超分共 4 项排两行；
  * MOSS 2 个 LoRA + 超分；Krea2 1 个 LoRA + 超分；Qwen 只有超分）。
  * 两个盒子 display: contents，里面的开关直接当网格项排，盒子自身的
@@ -559,6 +587,12 @@ textarea {
   font-weight: 600;
   padding: 3px 10px;
   border-radius: 999px;
+}
+
+/* 任务列表里的 Colab 徽章：与 Kaggle 徽章区分开（青色底，一眼能认出这单走的哪边）。 */
+.backend-badge-colab {
+  background: rgba(45, 212, 191, 0.16);
+  border-color: rgba(45, 212, 191, 0.45);
 }
 
 .job-size {

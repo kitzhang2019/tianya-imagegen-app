@@ -82,7 +82,10 @@ app.innerHTML = `
         <span id="prompt-count" class="muted">0 / ${MAX_PROMPT}</span>
       </div>
       <div class="select-row">
-        <label class="select-label" for="model-select">模型</label>
+        <div class="backend-pills" role="group" aria-label="平台">
+          <button type="button" class="backend-pill" data-backend="kaggle">Kaggle</button>
+          <button type="button" class="backend-pill" data-backend="colab">Colab</button>
+        </div>
         <div class="select-wrap">
           <select id="model-select" class="glass-select"></select>
           <span class="select-chev">▾</span>
@@ -142,11 +145,11 @@ app.innerHTML = `
     </div>
   </section>
 
-  <!-- 设置（管理员密码锁：未解锁看不到 Kaggle 账号、Token 和画廊设置） -->
+  <!-- 设置（管理员密码锁：未解锁看不到 Kaggle 账号、Token、Colab 中转密钥和画廊设置） -->
   <section id="tab-settings" class="tab-page">
     <div id="settings-lock" class="card glass" hidden>
       <h2>设置已锁定</h2>
-      <p class="muted">Kaggle 账号、Token 和画廊设置需要管理员密码才能查看和修改。</p>
+      <p class="muted">Kaggle 账号、Token、Colab 中转密钥和画廊设置需要管理员密码才能查看和修改。</p>
       <label class="field-label" for="admin-password">管理员密码</label>
       <input id="admin-password" type="password" inputmode="numeric" autocomplete="off" placeholder="输入管理员密码" />
       <p id="admin-password-error" class="error" hidden>密码不对，请重试。</p>
@@ -154,7 +157,7 @@ app.innerHTML = `
     </div>
     <div id="settings-first" class="card glass" hidden>
       <h2>首次使用：设置管理员密码</h2>
-      <p class="muted">以后查看和修改 Kaggle 账号、Token 和画廊设置都要输这个密码。密码只存在本机，不会上传。</p>
+      <p class="muted">以后查看和修改 Kaggle 账号、Token、Colab 中转密钥和画廊设置都要输这个密码。密码只存在本机，不会上传。</p>
       <label class="field-label" for="admin-password-new">管理员密码</label>
       <input id="admin-password-new" type="password" inputmode="numeric" autocomplete="off" placeholder="输入密码" />
       <label class="field-label" for="admin-password-confirm">确认密码</label>
@@ -170,6 +173,11 @@ app.innerHTML = `
       <input id="set-token" type="password" autocomplete="off" placeholder="KGAT 开头的 Token" />
       <p class="hint" id="token-state"></p>
       <p class="hint">Token 约 3 小时过期，过期后去 Kaggle 重新生成再填回来。</p>
+      <h2 class="section-h">Colab</h2>
+      <label class="field-label" for="set-relay-key">Colab 中转密钥</label>
+      <input id="set-relay-key" type="password" autocomplete="off" placeholder="中转 RELAY_KEY（与 Worker 上同一串）" />
+      <p class="hint" id="relay-key-state"></p>
+      <p class="hint">走 Colab 才用。没有密钥时走 Colab 会直接提示、不提交。密钥只存在本机，不会上传。</p>
       <h2 class="section-h">画廊</h2>
       <label class="field-label" for="set-gallery-key">画廊推送密钥</label>
       <input id="set-gallery-key" type="password" autocomplete="off" placeholder="天涯画廊的推送密钥" />
@@ -267,6 +275,7 @@ const toastEl = $("toast");
 
 let selectedModel = "moss";
 let selectedRatio = "auto";
+let selectedBackend = "kaggle"; // 生图走哪个后端：kaggle | colab，默认 Kaggle；存设置里
 // LoRA 选择（按模型记，切换模型回来还留着上次的选择）：
 // MOSS 是两个复选（默认只带观澜，Blender3D 默认不勾），Krea2 一个开关（默认带），
 // Z-Image 是三个复选（默认全带）。
@@ -419,6 +428,7 @@ function jobItemHtml(job) {
       <div class="job-info">
         <div class="job-top">
           <span class="badge">${MODEL_LABELS[job.model] ?? job.model}</span>
+          <span class="badge${job.backend === "colab" ? " backend-badge-colab" : ""}">${job.backend === "colab" ? "Colab" : "Kaggle"}</span>
           <span class="job-size">${outputSizeForJob(job).width}×${outputSizeForJob(job).height} · ${RATIO_LABELS[job.ratioKey] ?? ""}${job.ratioKey === "auto" ? "自动" : ""}</span>
           <span class="job-time muted">${timeAgo(job.createdAt)}</span>
           <span class="job-chevron" aria-hidden="true">${expanded ? "▾" : "▸"}</span>
@@ -512,6 +522,7 @@ function renderGallery() {
         <figcaption class="g-meta" data-view="${job.id}">
           <span class="g-model">${MODEL_LABELS[job.model] ?? job.model}</span>
           <span class="g-size">${outputSizeForJob(job).width}×${outputSizeForJob(job).height}</span>
+          <span class="g-size">${job.backend === "colab" ? "Colab" : "Kaggle"}</span>
           ${isRegen ? `<span class="g-pushed">↻ 重新生成</span>` : ""}
           ${pushed ? `<span class="g-pushed">✓ 已进画廊</span>` : ""}
         </figcaption>
@@ -545,11 +556,15 @@ function fillSettings() {
   const s = getSettings();
   $("set-username").value = s.kaggleUsername;
   $("set-token").value = s.kaggleToken;
+  $("set-relay-key").value = s.relayKey;
   $("set-gallery-key").value = s.galleryKey;
   $("set-gallery-url").value = s.galleryUrl;
   $("token-state").textContent = s.kaggleToken
     ? `当前已配置：${maskSecret(s.kaggleToken)}（只显示头尾，完整 Token 不会在界面上出现）`
     : "当前未配置。";
+  $("relay-key-state").textContent = s.relayKey
+    ? `当前已配置：${maskSecret(s.relayKey)}（只显示头尾，完整密钥不会在界面上出现）`
+    : "当前未配置（不填就不能走 Colab）。";
   $("gallery-key-state").textContent = s.galleryKey
     ? `当前已配置：${maskSecret(s.galleryKey)}`
     : "当前未配置（不填就不推送画廊，图只保存在本机）。";
@@ -581,7 +596,7 @@ let settingsUnlocked = false;
 
 function lockSettings() {
   settingsUnlocked = false;
-  ["set-username", "set-token", "set-gallery-key", "set-gallery-url", "admin-password", "admin-password-new", "admin-password-confirm"].forEach((id) => {
+  ["set-username", "set-token", "set-relay-key", "set-gallery-key", "set-gallery-url", "admin-password", "admin-password-new", "admin-password-confirm"].forEach((id) => {
     const el = $(id);
     if (el) el.value = "";
   });
@@ -839,6 +854,26 @@ $("model-select").addEventListener("change", (e) => {
   populateSelects(); // 换模型后比例选项的尺寸也要跟着换表重算
 });
 
+// 平台选择（Kaggle / Colab 两颗椭圆形药丸按钮）：点亮哪颗就走哪个平台，
+// 选择立刻存进设置；下次打开 App 还是上次选的那个。
+function syncBackendPills() {
+  document.querySelectorAll(".backend-pill").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.backend === selectedBackend);
+  });
+}
+
+document.querySelectorAll(".backend-pill").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    selectedBackend = btn.dataset.backend;
+    syncBackendPills();
+    try {
+      await saveSettings({ backend: selectedBackend });
+    } catch {
+      // 设置保存失败不影响本次选择（下次打开会回到存好的那个）
+    }
+  });
+});
+
 $("ratio-select").addEventListener("change", (e) => {
   selectedRatio = e.target.value;
 });
@@ -852,7 +887,19 @@ submitBtn.addEventListener("click", async () => {
     return;
   }
   const s = getSettings();
-  if (!s.kaggleUsername || !s.kaggleToken) {
+  if (selectedBackend === "colab") {
+    if (!s.relayKey) {
+      showFormError("请先在「设置」里填好 Colab 中转密钥。");
+      switchTab("settings");
+      return;
+    }
+    // 中转目前没有 Blender3D LoRA 的模型文件（只接了观澜），选了它提交
+    // 会在中转那边失败；提前拦住、别让用户等半天才看到报错。
+    if (selectedModel === "moss" && loraState.moss.includes("blender3d")) {
+      showFormError("Blender3D LoRA 暂不支持 Colab 路线：换 Kaggle，或取消勾选 Blender3D 再提交。");
+      return;
+    }
+  } else if (!s.kaggleUsername || !s.kaggleToken) {
     showFormError("请先在「设置」里完成配置。");
     switchTab("settings");
     return;
@@ -864,13 +911,14 @@ submitBtn.addEventListener("click", async () => {
       model: selectedModel,
       prompt,
       ratioKey: selectedRatio,
+      backend: selectedBackend,
       useLora: selectedModel === "krea2" ? loraState.krea2 : undefined,
       loraKeys: selectedModel === "zimage" ? [...loraState.zimage] : selectedModel === "moss" ? [...loraState.moss] : undefined,
       useUpscale,
     });
     promptEl.value = "";
     $("prompt-count").textContent = `0 / ${MAX_PROMPT}`;
-    toast("已提交，云端排队中（一次最多同时跑 2 个）");
+    toast(selectedBackend === "colab" ? "已提交到 Colab 中转，排队中（中转一次只跑一单）" : "已提交，云端排队中（一次最多同时跑 2 个）");
     switchTab("tasks");
   } catch (e) {
     showFormError(e instanceof Error ? e.message : String(e));
@@ -1115,6 +1163,7 @@ $("btn-save-settings").addEventListener("click", async () => {
     await saveSettings({
       kaggleUsername: $("set-username").value,
       kaggleToken: $("set-token").value,
+      relayKey: $("set-relay-key").value,
       galleryKey: $("set-gallery-key").value,
       galleryUrl: $("set-gallery-url").value,
     });
@@ -1165,9 +1214,15 @@ if (Capacitor.isNativePlatform()) {
   LocalNotifications.requestPermissions().catch(() => {});
 }
 
-initJobs().catch((e) => {
-  toast(`初始化失败：${e instanceof Error ? e.message : String(e)}`);
-});
+initJobs()
+  .then(() => {
+    // 恢复上次选的平台（存设置里），药丸按钮跟着点亮
+    selectedBackend = getSettings().backend === "colab" ? "colab" : "kaggle";
+    syncBackendPills();
+  })
+  .catch((e) => {
+    toast(`初始化失败：${e instanceof Error ? e.message : String(e)}`);
+  });
 
 // 切回前台立刻刷新一次任务状态：iOS 切到后台会挂起定时器，轮询停掉，
 // 回来只靠 20 秒定时器要等下一轮；切回来马上跑一轮，状态立刻跟上。
