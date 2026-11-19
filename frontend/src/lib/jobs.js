@@ -25,9 +25,9 @@ import {
   resolveSize,
   upscaleFlagForJob,
 } from "./notebook.js";
-import { KaggleClient, KaggleError, isKaggleQueueFullErrorText, isNetworkErrorText, normalizeKaggleRef } from "./kaggle.js";
+import { KaggleClient, KaggleError, isKaggleQueueFullErrorText, isNetworkErrorText, normalizeKaggleRef, pngDimensions } from "./kaggle.js";
 import { ColabClient, ColabError } from "./colab.js";
-import { DEFAULT_GALLERY_URL, pushToGallery } from "./gallery.js";
+import { DEFAULT_GALLERY_URL, attachGalleryOrig, pushToGallery } from "./gallery.js";
 
 const PREF_JOBS = "tianya-imagegen-jobs";
 const PREF_SETTINGS = "tianya-imagegen-settings";
@@ -555,6 +555,11 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
     webpFileName: null, // 下载回存时顺带下的同名 WebP（画廊推送用，PNG 超 10MB 推不动时推它）
     galleryPushed: null,
     galleryError: null,
+    // 补 PNG 原图的结果（推图成功后后台跑 attach-orig）：true=已补上，
+    // false=补不上（原因在 galleryOrigError），null=还没跑 / Colab 单跳过。
+    // 只记进任务记录，不影响任务状态、不重试、不弹窗。
+    galleryOrigPushed: null,
+    galleryOrigError: null,
     regeneratedFrom: null, // 重新生成时，指向原图任务 id
     regeneratedBy: null, // 被重新生成时，指向新图任务 id
     liveActivityId: null, // 锁屏 / 灵动岛常驻活动的 id（仅本机，不进画廊）
@@ -858,9 +863,89 @@ export function getJobProgress(job) {
   }
 }
 
+/** 推图成功后，后台把 PNG 原图补到画廊（attach-orig）。
+ * 只对 Kaggle 后端跑：Colab 单的 PNG 不在 Kaggle 上，直接跳过（不记错）。
+ * 全程与主流程脱钩：推图成功即算成功；这里任何一步失败都只把原因记进
+ * 任务记录（galleryOrigPushed=false + galleryOrigError），不标任务失败、
+ * 不重试、不弹窗。任务已被删时不再写回。调用方 fire-and-forget，不等它。
+ * PNG 的找法：内核输出里与任务 PNG 文件名同名的那一份就是最终成品
+ * （低分辨率那份叫 <prefix>_lowres.png，不会撞名）；下回来先验 PNG 魔数
+ * （downloadPng 已验），再读 IHDR 尺寸与任务最终尺寸比对，对不上就不贴。 */
+async function attachOrigInBackground(job, galleryId) {
+  // 调用时就快照关键字段：后台跑起来之后任务对象可能被别的步骤改动。
+  const jobId = job.id;
+  const backend = normalizeBackend(job.backend);
+  const kaggleRef = job.kaggleRef;
+  const width = job.width;
+  const height = job.height;
+  const imageFileName = job.imageFileName;
+  const fail = async (reason) => {
+    const current = jobs.find((j) => j.id === jobId);
+    if (!current) return;
+    updateJob(jobId, { galleryOrigPushed: false, galleryOrigError: String(reason).slice(0, 200) });
+    await saveJobs().catch(() => {});
+  };
+  try {
+    if (backend !== "kaggle") return; // Colab 单跳过，不记错
+    if (!galleryId) {
+      await fail("画廊回包里没有图 id，补不了原图");
+      return;
+    }
+    if (!kaggleRef) {
+      await fail("这单没有 Kaggle 任务号，找不到内核输出");
+      return;
+    }
+    if (!settings.galleryKey) {
+      await fail("画廊推送密钥未配置");
+      return;
+    }
+    // 成品 PNG 的名字：任务的 PNG 文件名（WebP 先行时 imageFileName 是 .webp，
+    // 换回 .png 就是成品名；老路本身就是 .png 名）。
+    const pngName = String(imageFileName || "").replace(/\.webp$/i, ".png");
+    if (!pngName || !/\.png$/i.test(pngName)) {
+      await fail("任务没有 PNG 文件名，补不了原图");
+      return;
+    }
+    const client = makeClient();
+    const found = await client.findOutputFile(kaggleRef, pngName, { budgetMs: FIND_BUDGET_MS });
+    if (!found.ok || !found.url) {
+      await fail(found.error || `内核输出里没找到 ${pngName}`);
+      return;
+    }
+    const bytes = await client.downloadPng(found.url);
+    const dims = pngDimensions(bytes);
+    if (!dims) {
+      await fail("下载到的 PNG 读不到尺寸，没贴");
+      return;
+    }
+    if (dims.width !== width || dims.height !== height) {
+      await fail(`PNG 尺寸 ${dims.width}×${dims.height} 与任务最终尺寸 ${width}×${height} 对不上，没贴`);
+      return;
+    }
+    const res = await attachGalleryOrig({
+      key: settings.galleryKey,
+      galleryId,
+      imageBytes: bytes,
+      fileName: pngName,
+    });
+    if (!res.ok) {
+      await fail(res.error || "补原图被画廊拒绝");
+      return;
+    }
+    const current = jobs.find((j) => j.id === jobId);
+    if (!current) return;
+    updateJob(jobId, { galleryOrigPushed: true, galleryOrigError: null });
+    await saveJobs();
+  } catch (e) {
+    await fail(e instanceof Error ? e.message : String(e));
+  }
+}
+
 /** 手动推送到画廊（图库多选推送用）：读本机图片文件，按画廊设置推送，更新任务状态。
  * 优先推 WebP：2560×3840 的 PNG 约 12MB 超过画廊 10MB 上传上限（实测回 502），
- * 同名 WebP 只有约 1.25MB；没 WebP（老任务）才回退推 PNG。 */
+ * 同名 WebP 只有约 1.25MB；没 WebP（老任务）才回退推 PNG。
+ * 推成功后在后台补 PNG 原图（attach-orig，Kaggle 单才跑）：fire-and-forget，
+ * 补不上只记进任务记录，不影响这次推送的成功结果。 */
 export async function pushJobToGallery(id) {
   const job = jobs.find((j) => j.id === id);
   if (!job) throw new Error("找不到这条任务");
@@ -886,6 +971,9 @@ export async function pushJobToGallery(id) {
         galleryError: push.ok ? null : push.error,
       });
       await saveJobs();
+      // 推成功了才在后台补 PNG 原图：fire-and-forget，补不上只记进任务记录，
+      // 不影响这次推送的成功结果。
+      if (push.ok) attachOrigInBackground(job, push.galleryId).catch(() => {});
       return push;
     } catch {
       // WebP 读不到就回退推 PNG。
@@ -911,6 +999,9 @@ export async function pushJobToGallery(id) {
     galleryError: push.ok ? null : push.error,
   });
   await saveJobs();
+  // 推成功了才在后台补 PNG 原图：fire-and-forget，补不上只记进任务记录，
+  // 不影响这次推送的成功结果。
+  if (push.ok) attachOrigInBackground(job, push.galleryId).catch(() => {});
   return push;
 }
 

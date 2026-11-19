@@ -22,6 +22,13 @@ import { bytesToBase64, loraLabelForJob, outputSizeForJob, upscalerLabelForJob }
 export const DEFAULT_GALLERY_URL =
   "https://tianya-gallery-bizen7j8-workspace-krgsbt.cloady.io/upload.php";
 
+// 补原图接口：与 upload.php 不在同一台主机——它在画廊主站
+// image.tianyagk.dpdns.org 上（与管理站 attach-orig 同款地址），
+// upload.php 所在的 cloady.io 直连地址不提供 /api/attach-orig。
+// multipart 字段 key/id/image，只接受 PNG / JPG / WebP，成功返回
+// {"ok":true,"id":"...","orig":"images/<id>.<ext>"}。
+export const GALLERY_ATTACH_ORIG_URL = "https://image.tianyagk.dpdns.org/api/attach-orig";
+
 export const GALLERY_MODEL_LABELS = {
   moss: "MOSS-Image",
   qwen: "Qwen Image 2.1",
@@ -41,7 +48,9 @@ export const MODEL_GALLERY_PARAMS = {
 
 /**
  * @param {{url:string, key:string, job:{model:string, prompt:string, seed:number, width:number, height:number, createdAt:number}, imageBytes:Uint8Array, fileName:string, contentType?:string}} args
- * @returns {Promise<{ok:boolean, error:string|null}>}
+ * @returns {Promise<{ok:boolean, error:string|null, galleryId:string|null}>}
+ * galleryId：upload.php 成功回包里的画廊图 id（{"ok":true,"id":"...","url":"images/..."}），
+ * 补原图要用它；回包里没有 id 时为 null，调用方按“补不了”记一笔。
  */
 export async function pushToGallery({ url, key, job, imageBytes, fileName, contentType = "image/png" }) {
   if (!key) return { ok: false, error: "画廊推送密钥未配置" };
@@ -102,7 +111,7 @@ export async function pushToGallery({ url, key, job, imageBytes, fileName, conte
       });
       const data = res.data ?? {};
       if (res.status >= 200 && res.status < 300 && data?.ok === true) {
-        return { ok: true, error: null };
+        return { ok: true, error: null, galleryId: typeof data?.id === "string" && data.id ? data.id : null };
       }
       return { ok: false, error: data?.error ?? `画廊返回异常（HTTP ${res.status}）` };
     }
@@ -116,12 +125,76 @@ export async function pushToGallery({ url, key, job, imageBytes, fileName, conte
     try {
       const res = await fetch(endpoint, { method: "POST", body: form, signal: controller.signal });
       const data = await res.json().catch(() => null);
-      if (res.ok && data?.ok === true) return { ok: true, error: null };
+      if (res.ok && data?.ok === true) {
+        return { ok: true, error: null, galleryId: typeof data?.id === "string" && data.id ? data.id : null };
+      }
       return { ok: false, error: data?.error ?? `画廊返回异常（HTTP ${res.status}）` };
     } finally {
       clearTimeout(timer);
     }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * 补一张 PNG 原图到画廊（画廊 /api/attach-orig，multipart 字段 key/id/image）。
+ * 只在 WebP 推图成功之后由调用方在后台调一次：推图成功即算成功，这里失败
+ * 只返回 {ok:false, error}，调用方记进任务记录，不标任务失败、不重试、不弹窗。
+ * 密钥只从 App 设置里传进来，绝不写进代码或日志；传输层与 pushToGallery
+ * 同款（原生 CapacitorHttp formData 条目 / 桌面 fetch + FormData）。
+ * @param {{key:string, galleryId:string, imageBytes:Uint8Array, fileName:string, contentType?:string}} args
+ * @returns {Promise<{ok:boolean, error:string|null, orig:string|null}>}
+ */
+export async function attachGalleryOrig({ key, galleryId, imageBytes, fileName, contentType = "image/png" }) {
+  if (!key) return { ok: false, error: "画廊推送密钥未配置", orig: null };
+  if (!galleryId) return { ok: false, error: "没有画廊图 id，补不了原图", orig: null };
+  if (!imageBytes || imageBytes.length === 0) return { ok: false, error: "没有图片数据", orig: null };
+  try {
+    if (Capacitor.isNativePlatform()) {
+      // 原生 formData 条目数组：字符串字段 + base64 图片文件
+      const entries = [
+        { type: "string", key: "key", value: key },
+        { type: "string", key: "id", value: galleryId },
+        { type: "base64File", key: "image", value: bytesToBase64(imageBytes), fileName, contentType },
+      ];
+      const res = await CapacitorHttp.request({
+        url: GALLERY_ATTACH_ORIG_URL,
+        method: "POST",
+        data: entries,
+        dataType: "formData",
+        // 必须带 Content-Type 头：iOS/Android 原生端没有它就不拼请求体
+        // （setRequestBody 见到空 Content-Type 直接返回），服务器就收不到
+        // multipart，报「需要 multipart 表单」（2026-11-13 真机实测教训）。
+        headers: { "Content-Type": "multipart/form-data" },
+        connectTimeout: 15000,
+        // 读超时 120 秒：PNG 约 12MB，慢网下仍要留足时间。
+        readTimeout: 120000,
+        responseType: "json",
+      });
+      const data = res.data ?? {};
+      if (res.status >= 200 && res.status < 300 && data?.ok === true) {
+        return { ok: true, error: null, orig: typeof data?.orig === "string" ? data.orig : null };
+      }
+      return { ok: false, error: data?.error ?? `画廊返回异常（HTTP ${res.status}）`, orig: null };
+    }
+
+    // 桌面浏览器：真实 FormData + fetch（需服务端放行 CORS 才能通）
+    const form = new FormData();
+    form.set("key", key);
+    form.set("id", galleryId);
+    form.set("image", new Blob([imageBytes], { type: contentType }), fileName);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120000);
+    try {
+      const res = await fetch(GALLERY_ATTACH_ORIG_URL, { method: "POST", body: form, signal: controller.signal });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.ok === true) return { ok: true, error: null, orig: typeof data?.orig === "string" ? data.orig : null };
+      return { ok: false, error: data?.error ?? `画廊返回异常（HTTP ${res.status}）`, orig: null };
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e), orig: null };
   }
 }

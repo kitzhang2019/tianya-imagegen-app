@@ -24,6 +24,18 @@ const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 // WebP 魔数：前 4 字节 RIFF，第 9-12 字节 WEBP。
 const WEBP_RIFF = [0x52, 0x49, 0x46, 0x46];
 const WEBP_MARK = [0x57, 0x45, 0x42, 0x50];
+
+/** 读 PNG 的 IHDR 尺寸（宽在偏移 16、高在偏移 20，大端 uint32）。
+ * 不是 PNG、太短、或 IHDR 标记不对时返回 null（调用方按“尺寸读不到”处理，
+ * 不贴图）。 */
+export function pngDimensions(bytes) {
+  if (!bytes || bytes.length < 24) return null;
+  if (!PNG_MAGIC.every((b, i) => bytes[i] === b)) return null;
+  // IHDR 标记在偏移 12–15（"IHDR"）
+  if (bytes[12] !== 0x49 || bytes[13] !== 0x48 || bytes[14] !== 0x44 || bytes[15] !== 0x52) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { width: view.getUint32(16), height: view.getUint32(20) };
+}
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 回存图片上限 20MB（用户规则：生成图 <20MB；PNG 和 WebP 共用；2560×3840 的 PNG 约 12MB，8MB 装不下）
 
 export class KaggleError extends Error {
