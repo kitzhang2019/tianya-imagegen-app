@@ -288,15 +288,29 @@ const loraState = {
 
 // 超分开关（2026-11-15，用户定：默认开）：开 = 底图 + SeedVR 7B → 最终尺寸；
 // 关 = 底图直接当成品，不挂 SeedVR 数据集。四个模型共用一个开关（不按模型记）。
+// 只管 Kaggle；选 Colab 时它灰掉点不了（值留着，切回 Kaggle 还在）。
 let useUpscale = true;
 
-/** 渲染超分开关：单个开关钮，默认点亮，样式与 LoRA 开关钮一致（.lora-row）。 */
+// Colab 3B 超分开关（2026-11-19，用户定：默认开）：开 = 底图 + SeedVR 3B 放大，
+// 关 = 底图直接出、不挂放大。只管 Colab；选 Kaggle 时它灰掉点不了（值留着，
+// 切回 Colab 还在）。两个开关各管各的后端，互不影响。
+let useColabUpscale = true;
+
+/** 渲染超分开关：两个开关各管一个后端，另一个灰掉点不了。
+ * 7B 开关只在 Kaggle 下可点，3B 开关只在 Colab 下可点；灰掉只是不让点，
+ * 绝不改另一边的行为（Kaggle 的 7B、Colab 的 3B 默认都是开）。 */
 function renderUpscaleBox() {
   const box = $("upscale-box");
   if (!box) return;
-  box.innerHTML = `<label class="lora-row"><input type="checkbox" data-upscale ${useUpscale ? "checked" : ""} /> 超分 SeedVR 7B</label>`;
+  const kaggleSelected = selectedBackend === "kaggle";
+  box.innerHTML =
+    `<label class="lora-row${kaggleSelected ? "" : " disabled"}"><input type="checkbox" data-upscale ${useUpscale ? "checked" : ""}${kaggleSelected ? "" : " disabled"} /> 超分 SeedVR 7B</label>` +
+    `<label class="lora-row${kaggleSelected ? " disabled" : ""}"><input type="checkbox" data-colab-upscale ${useColabUpscale ? "checked" : ""}${kaggleSelected ? " disabled" : ""} /> 超分 SeedVR 3B</label>`;
   box.querySelector("input[data-upscale]").addEventListener("change", (e) => {
     useUpscale = e.target.checked;
+  });
+  box.querySelector("input[data-colab-upscale]").addEventListener("change", (e) => {
+    useColabUpscale = e.target.checked;
   });
 }
 
@@ -867,6 +881,8 @@ document.querySelectorAll(".backend-pill").forEach((btn) => {
   btn.addEventListener("click", async () => {
     selectedBackend = btn.dataset.backend;
     syncBackendPills();
+    // 换后端立刻刷新超分开关的可用状态：7B 只在 Kaggle 下可点，3B 只在 Colab 下可点。
+    renderUpscaleBox();
     try {
       await saveSettings({ backend: selectedBackend });
     } catch {
@@ -916,6 +932,7 @@ submitBtn.addEventListener("click", async () => {
       useLora: selectedModel === "krea2" ? loraState.krea2 : undefined,
       loraKeys: selectedModel === "zimage" ? [...loraState.zimage] : selectedModel === "moss" ? [...loraState.moss] : undefined,
       useUpscale,
+      useColabUpscale,
     });
     promptEl.value = "";
     $("prompt-count").textContent = `0 / ${MAX_PROMPT}`;
@@ -1217,9 +1234,10 @@ if (Capacitor.isNativePlatform()) {
 
 initJobs()
   .then(() => {
-    // 恢复上次选的平台（存设置里），药丸按钮跟着点亮
+    // 恢复上次选的平台（存设置里），药丸按钮跟着点亮，超分开关的可用状态也跟着变
     selectedBackend = getSettings().backend === "colab" ? "colab" : "kaggle";
     syncBackendPills();
+    renderUpscaleBox();
   })
   .catch((e) => {
     toast(`初始化失败：${e instanceof Error ? e.message : String(e)}`);

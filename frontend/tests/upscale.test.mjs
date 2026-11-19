@@ -15,6 +15,7 @@ import {
   patchNotebook,
   ratioOptionLabel,
   resolveSize,
+  upscaleFlagForJob,
   upscalerLabelForJob,
   upscaleOffSize,
 } from "../src/lib/notebook.js";
@@ -48,6 +49,35 @@ function patched(model, opts = {}) {
   const cellText = (c) => (typeof c.source === "string" ? c.source : c.source.join(""));
   return { text, run: cellText(cells[4]), disp: cellText(cells[5]), dl: cellText(cells[3]) };
 }
+
+test("upscaleFlagForJob：Kaggle 走 7B 开关，Colab 走 3B 开关；老 Colab 单（没新字段）回退到旧字段", () => {
+  // Kaggle：只看 useUpscale，3B 开关的值不影响
+  assert.equal(upscaleFlagForJob({ backend: "kaggle", useUpscale: true, useColabUpscale: false }), true);
+  assert.equal(upscaleFlagForJob({ backend: "kaggle", useUpscale: false, useColabUpscale: true }), false);
+  // Colab：只看 useColabUpscale，7B 开关的值不影响
+  assert.equal(upscaleFlagForJob({ backend: "colab", useUpscale: false, useColabUpscale: true }), true);
+  assert.equal(upscaleFlagForJob({ backend: "colab", useUpscale: true, useColabUpscale: false }), false);
+  // 老任务：没 backend 字段按 Kaggle；老 Colab 单没 useColabUpscale 时按旧字段
+  assert.equal(upscaleFlagForJob({ useUpscale: false }), false);
+  assert.equal(upscaleFlagForJob({ backend: "colab", useUpscale: false }), false);
+  assert.equal(upscaleFlagForJob({ backend: "colab", useUpscale: true }), true);
+  assert.equal(upscaleFlagForJob({ backend: "colab" }), true);
+  assert.equal(upscaleFlagForJob(null), true);
+});
+
+test("outputSizeForJob / upscalerLabelForJob（Colab）：开=任务尺寸/SeedVR 3B，关=底图尺寸/无", () => {
+  const base = { model: "moss", backend: "colab", width: 1696, height: 2256 };
+  assert.deepEqual(outputSizeForJob({ ...base, useUpscale: true, useColabUpscale: true }), { width: 1696, height: 2256 });
+  assert.equal(upscalerLabelForJob({ ...base, useUpscale: true, useColabUpscale: true }), "SeedVR 3B");
+  assert.deepEqual(outputSizeForJob({ ...base, useUpscale: true, useColabUpscale: false }), { width: 848, height: 1136 });
+  assert.equal(upscalerLabelForJob({ ...base, useUpscale: true, useColabUpscale: false }), "无");
+  // 7B 开关不影响 Colab 单的尺寸与标签
+  assert.deepEqual(outputSizeForJob({ ...base, useUpscale: false, useColabUpscale: true }), { width: 1696, height: 2256 });
+  assert.equal(upscalerLabelForJob({ ...base, useUpscale: false, useColabUpscale: true }), "SeedVR 3B");
+  // 老 Colab 单（没 3B 字段）按旧字段回退
+  assert.deepEqual(outputSizeForJob({ ...base, useUpscale: false }), { width: 848, height: 1136 });
+  assert.equal(upscalerLabelForJob({ ...base, useUpscale: false }), "无");
+});
 
 test("normalizeUseUpscale：只有明确 false 才关，老任务（undefined/null）按开处理", () => {
   assert.equal(normalizeUseUpscale(undefined), true);
@@ -177,6 +207,30 @@ function stubFetchCapture() {
   };
   return () => captured;
 }
+
+test("pushToGallery（Colab）：开写任务尺寸 + SeedVR 3B；关写底图尺寸 + 无；7B 开关不影响", async () => {
+  const getBody = stubFetchCapture();
+  const base = { model: "moss", backend: "colab", prompt: "p", seed: 5, width: 1696, height: 2256, createdAt: 1700000000000, loraKeys: ["guanlan"] };
+  let res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: { ...base, useUpscale: true, useColabUpscale: true }, imageBytes: new Uint8Array([1]), fileName: "a.png" });
+  assert.equal(res.ok, true);
+  let body = getBody();
+  assert.equal(body.get("width"), "1696");
+  assert.equal(body.get("height"), "2256");
+  assert.equal(body.get("upscaler"), "SeedVR 3B");
+
+  res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: { ...base, useUpscale: true, useColabUpscale: false }, imageBytes: new Uint8Array([1]), fileName: "a.png" });
+  assert.equal(res.ok, true);
+  body = getBody();
+  assert.equal(body.get("width"), "848");
+  assert.equal(body.get("height"), "1136");
+  assert.equal(body.get("upscaler"), "无");
+
+  // 老 Colab 单（没 3B 字段）按旧字段回退：旧字段关就是无
+  res = await pushToGallery({ url: "https://x/upload.php", key: "k", job: { ...base, useUpscale: false }, imageBytes: new Uint8Array([1]), fileName: "a.png" });
+  assert.equal(res.ok, true);
+  body = getBody();
+  assert.equal(body.get("upscaler"), "无");
+});
 
 test("pushToGallery：开超分写任务尺寸 + SeedVR 7B；关写底图尺寸 + 无；老任务按开", async () => {
   const getBody = stubFetchCapture();

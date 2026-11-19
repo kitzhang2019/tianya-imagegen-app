@@ -16,7 +16,7 @@ import {
   stopPolling,
   submitJob,
 } from "../src/lib/jobs.js";
-import { upscalerLabelForJob } from "../src/lib/notebook.js";
+import { upscalerLabelForJob, outputSizeForJob } from "../src/lib/notebook.js";
 
 const realFetch = globalThis.fetch;
 
@@ -131,4 +131,30 @@ test("regenerateJob：关保持关（旧图保留、新任务带原选择）", a
   assert.equal(regen.regeneratedFrom, offJob.id);
   assert.equal(offJob.regeneratedBy, regen.id);
   assert.notEqual(regen.seed, offJob.seed);
+});
+
+test("Kaggle 单不受 3B 开关影响：3B 关了，Kaggle 仍按 7B 开走", async () => {
+  const job = await submitJob({ model: "krea2", prompt: "kaggle 3b off", backend: "kaggle", useUpscale: true, useColabUpscale: false });
+  assert.equal(job.backend, "kaggle");
+  assert.equal(job.useUpscale, true);
+  assert.equal(job.useColabUpscale, false);
+  // 尺寸与画廊标签都跟 7B 开关走，不跟 3B 开关走
+  assert.equal(upscalerLabelForJob(job), "SeedVR 7B");
+  assert.deepEqual(outputSizeForJob(job), { width: job.width, height: job.height });
+  await sleep(50); // 让后台的 runJob 跑完失败流程，不影响后面的断言
+});
+
+test("老 Colab 单重提：没有 3B 字段时按旧 7B 字段回退", async () => {
+  await saveSettings({ relayKey: "test-relay-key" });
+  const old = await submitJob({ model: "qwen", prompt: "old colab no 3b", backend: "colab", useUpscale: false });
+  assert.equal(old.useColabUpscale, false);
+  // 模拟 v1.2.22 之前的旧记录：删掉 3B 字段、标成失败（只改内存里的记录）。
+  delete old.useColabUpscale;
+  Object.assign(old, { status: "failed", stage: "failed", error: "之前失败了" });
+  const retried = await retryJob(old.id);
+  assert.notEqual(retried.id, old.id);
+  assert.equal(retried.backend, "colab");
+  assert.equal(retried.useUpscale, false);
+  assert.equal(retried.useColabUpscale, false);
+  await sleep(50);
 });

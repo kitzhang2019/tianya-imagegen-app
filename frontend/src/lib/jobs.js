@@ -23,6 +23,7 @@ import {
   patchNotebook,
   randomSeed,
   resolveSize,
+  upscaleFlagForJob,
 } from "./notebook.js";
 import { KaggleClient, KaggleError, isKaggleQueueFullErrorText, isNetworkErrorText, normalizeKaggleRef } from "./kaggle.js";
 import { ColabClient, ColabError } from "./colab.js";
@@ -491,9 +492,11 @@ function makeColabClient() {
 
 /** 提交一单：只建记录进本地队列，由 pumpQueue 按 2 并发启动。
  * useLora：Krea2 的 LoRA 开关（默认带）；loraKeys：MOSS 的 LoRA 选择（默认只带
- * 观澜，空数组 = 不挂）/ Z-Image 的 LoRA 选择（默认全带）。useUpscale：超分
- * 开关（默认开，false = 底图直接当成品、不挂 SeedVR 数据集）。 */
-export async function submitJob({ model, prompt, ratioKey = "auto", useLora, loraKeys, useUpscale, kaggleSlug, backend }) {
+ * 观澜，空数组 = 不挂）/ Z-Image 的 LoRA 选择（默认全带）。useUpscale：Kaggle
+ * 的 7B 超分开关（默认开，false = 底图直接当成品、不挂 SeedVR 数据集）。
+ * useColabUpscale：Colab 的 3B 超分开关（默认开，false = 底图直接出、不挂
+ * 放大；没传时跟 7B 开关走）。两个开关各管各的后端，互不影响。 */
+export async function submitJob({ model, prompt, ratioKey = "auto", useLora, loraKeys, useUpscale, useColabUpscale, kaggleSlug, backend }) {
   const normalizedBackend = normalizeBackend(backend ?? settings.backend);
   requireCreds(normalizedBackend);
   const cleanPrompt = String(prompt || "").trim();
@@ -518,8 +521,9 @@ export async function submitJob({ model, prompt, ratioKey = "auto", useLora, lor
           ? normalizeLoraKeys(loraKeys ?? DEFAULT_ZIMAGE_LORA_KEYS)
           : undefined,
     // 超分开关随任务持久化（默认开；老任务没有该字段时按开处理，见 normalizeUseUpscale）。
-    // 重提/重新生成按原选择重放。
+    // 重提/重新生成按原选择重放。7B 开关只管 Kaggle，3B 开关只管 Colab。
     useUpscale: normalizeUseUpscale(useUpscale),
+    useColabUpscale: normalizeUseUpscale(useColabUpscale ?? useUpscale),
     width: size.width,
     height: size.height,
     seed: randomSeed(),
@@ -602,7 +606,7 @@ export async function retryJob(id) {
     setNetworkDown(true);
     throw new Error("网络还没恢复，无法确认云端这单的状态，稍后再点重新提交。");
   }
-  return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale, kaggleSlug: slug });
+  return submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale, useColabUpscale: old.useColabUpscale, kaggleSlug: slug });
 }
 
 /** Colab 单的失败任务重提：先按 colabJobId 查中转——
@@ -622,6 +626,7 @@ async function retryColabJob(old) {
       useLora: old.useLora,
       loraKeys: old.loraKeys,
       useUpscale: old.useUpscale,
+      useColabUpscale: old.useColabUpscale,
       backend: "colab",
     });
   if (!old.colabJobId) return resubmit();
@@ -712,7 +717,7 @@ export async function regenerateJob(id) {
   const old = jobs.find((j) => j.id === id);
   if (!old) throw new Error("找不到这张图");
   if (old.status !== "done") throw new Error("这张图还没完成，不能重新生成");
-  const job = await submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale, backend: normalizeBackend(old.backend) });
+  const job = await submitJob({ model: old.model, prompt: old.prompt, ratioKey: old.ratioKey || "auto", useLora: old.useLora, loraKeys: old.loraKeys, useUpscale: old.useUpscale, useColabUpscale: old.useColabUpscale, backend: normalizeBackend(old.backend) });
   job.regeneratedFrom = old.id;
   old.regeneratedBy = job.id;
   await saveJobs();
@@ -1066,7 +1071,8 @@ async function runColabJob(job) {
         seed: job.seed,
         loraKeys: job.loraKeys,
         useLora: job.useLora,
-        useUpscale: job.useUpscale,
+        // Colab 只走 3B 开关（useColabUpscale）；老任务没有该字段时按旧字段回退。
+        useUpscale: upscaleFlagForJob(job),
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1120,9 +1126,13 @@ async function tryAutoSwitchToColab(job) {
   // 同一单改走 Colab：任务 id、提示词、种子、模型、LoRA 选择、超分开关
   // 全原样保留，只改后端与认领标记；kaggleRef 本来就是 null（push 被拒
   // 在前，ref 还没建出来），kaggleSlug 留着备查。
+  // 3B 开关在提交 Kaggle 时是灰的、用户没法设：切过去时把提交时 7B 开关
+  // 的选择镜像过来，这样“关了超分”这单切到 Colab 也还是关超分（和 v1.2.22
+  // 只有一个开关时完全一致），而不是被 3B 开关的默认值偷偷改成开。
   updateJob(job.id, {
     backend: "colab",
     autoSwitchedToColab: true,
+    useColabUpscale: normalizeUseUpscale(current.useUpscale),
     status: "preparing",
     stage: "preparing",
     stageDetail: "Kaggle 队列已满，已自动切换到 Colab 生成",

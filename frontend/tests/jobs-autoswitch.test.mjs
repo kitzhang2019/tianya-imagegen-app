@@ -278,3 +278,59 @@ test("其他错误（401）→ 不切、按原样失败", async () => {
   assert.match(cur.error, /401/);
   assert.equal(fake.postCalls.length, 0); // 没往 Colab 发过提交
 });
+
+test("自动切 Colab：提交时 7B 关、3B 开，切过去后按 7B 的关走（镜像，不被 3B 默认值改掉）", async () => {
+  resetFake();
+  // 提交 Kaggle 时 3B 开关是灰的、用户设不了：存的是之前 Colab 会话留下的开。
+  const job = await submitJob({ model: "qwen", prompt: "autoswitch mirror off test", backend: "kaggle", useUpscale: false, useColabUpscale: true });
+  assert.equal(job.useUpscale, false);
+  assert.equal(job.useColabUpscale, true);
+  await waitFor(
+    () => {
+      const cur = getJobs().find((j) => j.id === job.id);
+      return cur?.backend === "colab" && cur?.status === "queued" && !!cur?.colabJobId;
+    },
+    8000,
+    "队列满的单切到 Colab 并进排队",
+  );
+  const cur = getJobs().find((j) => j.id === job.id);
+  assert.equal(cur.autoSwitchedToColab, true);
+  assert.equal(cur.useColabUpscale, false); // 镜像：7B 的关带过来了
+  assert.equal(fake.postCalls.length, 1);
+  const body = JSON.parse(fake.postCalls[0].body);
+  assert.equal(body.useUpscale, false); // 中转收到的也是关
+  // 跑完收尾，别占着并发位
+  const remote = fakeRelayJob(cur.colabJobId);
+  remote.status = "done";
+  remote.progress = 100;
+  await __tickForTest();
+  const done = getJobs().find((j) => j.id === job.id);
+  assert.equal(done.status, "done");
+});
+
+test("自动切 Colab：提交时 7B 开、3B 关，切过去后按 7B 的开走（镜像）", async () => {
+  resetFake();
+  const job = await submitJob({ model: "qwen", prompt: "autoswitch mirror on test", backend: "kaggle", useUpscale: true, useColabUpscale: false });
+  assert.equal(job.useUpscale, true);
+  assert.equal(job.useColabUpscale, false);
+  await waitFor(
+    () => {
+      const cur = getJobs().find((j) => j.id === job.id);
+      return cur?.backend === "colab" && cur?.status === "queued" && !!cur?.colabJobId;
+    },
+    8000,
+    "队列满的单切到 Colab 并进排队",
+  );
+  const cur = getJobs().find((j) => j.id === job.id);
+  assert.equal(cur.autoSwitchedToColab, true);
+  assert.equal(cur.useColabUpscale, true); // 镜像：7B 的开带过来了
+  assert.equal(fake.postCalls.length, 1);
+  const body = JSON.parse(fake.postCalls[0].body);
+  assert.equal(body.useUpscale, true);
+  const remote = fakeRelayJob(cur.colabJobId);
+  remote.status = "done";
+  remote.progress = 100;
+  await __tickForTest();
+  const done = getJobs().find((j) => j.id === job.id);
+  assert.equal(done.status, "done");
+});

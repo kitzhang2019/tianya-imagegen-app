@@ -340,6 +340,13 @@ textarea {
   flex: none;
 }
 
+/* 灰掉的开关行（超分开关不适用当前后端时）：变淡、不可点。
+ * 7B 开关只在 Kaggle 下可点，3B 开关只在 Colab 下可点。 */
+.lora-row.disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* 设置页“出图完成提醒”开关行（不锁的卡片里） */
 .notify-row {
   display: flex;

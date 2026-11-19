@@ -239,16 +239,27 @@ export function upscaleOffSize(width, height) {
   return { width: round16(width / 2), height: round16(height / 2) };
 }
 
+/** 一条任务实际用的超分开关：Colab 单走 3B 开关（useColabUpscale），
+ * Kaggle 单走 7B 开关（useUpscale）。老任务没有新字段时回退到旧字段
+ * （老 Colab 单只有 useUpscale，那时两个开关还是同一个）。 */
+export function upscaleFlagForJob(job) {
+  if (!job) return true;
+  if (job.backend === "colab") return normalizeUseUpscale(job.useColabUpscale ?? job.useUpscale);
+  return normalizeUseUpscale(job.useUpscale);
+}
+
 /** 一条任务的实际出图尺寸：开 = 任务尺寸，关 = 底图尺寸。 */
 export function outputSizeForJob(job) {
   if (!job) return { width: 0, height: 0 };
-  if (normalizeUseUpscale(job.useUpscale)) return { width: job.width, height: job.height };
+  if (upscaleFlagForJob(job)) return { width: job.width, height: job.height };
   return upscaleOffSize(job.width, job.height);
 }
 
-/** 一条任务的超分标签（画廊 upscaler 字段）：开「SeedVR 7B」，关「无」。 */
+/** 一条任务的超分标签（画廊 upscaler 字段）：Kaggle 开「SeedVR 7B」、
+ * Colab 开「SeedVR 3B」，关都是「无」。 */
 export function upscalerLabelForJob(job) {
-  return normalizeUseUpscale(job?.useUpscale) ? "SeedVR 7B" : "无";
+  if (!upscaleFlagForJob(job)) return "无";
+  return job?.backend === "colab" ? "SeedVR 3B" : "SeedVR 7B";
 }
 
 /** 一条任务要挂的 Kaggle 数据集（纯函数，供 runJob 与单测共用）：主模型 +

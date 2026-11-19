@@ -84,3 +84,25 @@ test("开始生成按钮下方有后端使用说明：优先 Kaggle，队列满�
     /id="btn-submit"[^>]*>开始生成<\/button>\s*<p class="hint">优先使用 Kaggle，如果 Kaggle 出故障了，使用 Colab 生成。（Kaggle 队列已满自动切换 Colab 生成，Colab 速度可能会慢。）<\/p>/s,
   );
 });
+
+test("超分 SeedVR 3B 开关：只在 Colab 下可点，Kaggle 下灰掉；7B 开关反过来", () => {
+  // 主页上有 3B 开关，文案写明是 SeedVR 3B，跟 7B 开关并排在超分盒子里
+  assert.match(mainJs, /超分 SeedVR 3B/);
+  assert.match(mainJs, /data-colab-upscale/);
+  assert.match(mainJs, /id="upscale-box"/);
+  // 渲染函数按后端给两个开关加 disabled：3B 只在 Colab 下可点
+  // （Kaggle 下 label 带 disabled、checkbox 带 disabled），7B 反过来
+  assert.match(mainJs, /lora-row\$\{kaggleSelected \? " disabled" : ""\}/);
+  assert.match(mainJs, /lora-row\$\{kaggleSelected \? "" : " disabled"\}/);
+  assert.match(mainJs, /data-colab-upscale \$\{useColabUpscale \? "checked" : ""\}\$\{kaggleSelected \? " disabled" : ""\}/);
+  assert.match(mainJs, /data-upscale \$\{useUpscale \? "checked" : ""\}\$\{kaggleSelected \? "" : " disabled"\}/);
+  // 3B 开关默认开（和 7B 开关一样，只认明确关掉）
+  assert.match(mainJs, /let useColabUpscale = true;/);
+  // 换后端立刻重渲染超分盒子，可用状态马上跟着变；恢复上次选的后端时也一样
+  assert.match(mainJs, /selectedBackend = btn\.dataset\.backend;[\s\S]{0,300}renderUpscaleBox\(\);/);
+  assert.match(mainJs, /selectedBackend = getSettings\(\)\.backend === "colab" \? "colab" : "kaggle";[\s\S]{0,200}renderUpscaleBox\(\);/);
+  // 提交时把 3B 选择传给任务层
+  assert.match(mainJs, /await submitJob\(\{[\s\S]*?useColabUpscale,/);
+  // 灰掉的开关行变淡、不可点
+  assert.match(css, /\.lora-row\.disabled\s*\{[^}]*opacity:\s*0\.45/s);
+});

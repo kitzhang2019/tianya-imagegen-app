@@ -378,3 +378,87 @@ test("Kaggle 单不受影响：没 backend 的老任务仍走 Kaggle 校验", as
     await deleteJob(j.id);
   }
 });
+
+// --- 超分 SeedVR 3B 开关（v1.2.23）：只管 Colab，默认开；中转收到的
+// useUpscale 就是这个开关的值（关 = 底图直接出、不挂放大）。 ---
+test("submitJob Colab 3B 开关：默认开，中转收到的 useUpscale 是 true", async () => {
+  resetFake();
+  await clearActiveJobs();
+  const job = await submitJob({ model: "qwen", prompt: "colab 3b default test", backend: "colab" });
+  assert.equal(job.backend, "colab");
+  assert.equal(job.useColabUpscale, true);
+  assert.equal(job.useUpscale, true);
+  await waitFor(
+    () => getJobs().find((j) => j.id === job.id)?.status === "queued",
+    8000,
+    "Colab 单进排队",
+  );
+  assert.equal(fake.postCalls.length, 1);
+  const body = JSON.parse(fake.postCalls[0].body);
+  assert.equal(body.useUpscale, true);
+});
+
+test("submitJob Colab 3B 开关：关了，中转收到的 useUpscale 是 false", async () => {
+  resetFake();
+  await clearActiveJobs();
+  const job = await submitJob({ model: "qwen", prompt: "colab 3b off test", backend: "colab", useColabUpscale: false });
+  assert.equal(job.useColabUpscale, false);
+  assert.equal(job.useUpscale, true); // 7B 开关没动，仍是默认开
+  await waitFor(
+    () => getJobs().find((j) => j.id === job.id)?.status === "queued",
+    8000,
+    "Colab 单进排队",
+  );
+  assert.equal(fake.postCalls.length, 1);
+  const body = JSON.parse(fake.postCalls[0].body);
+  assert.equal(body.useUpscale, false);
+});
+
+test("submitJob Colab 老调用：只传 7B 开关关，3B 跟着关（回退，不丢旧行为）", async () => {
+  resetFake();
+  await clearActiveJobs();
+  const job = await submitJob({ model: "qwen", prompt: "colab old style test", backend: "colab", useUpscale: false });
+  assert.equal(job.useUpscale, false);
+  assert.equal(job.useColabUpscale, false);
+  await waitFor(
+    () => getJobs().find((j) => j.id === job.id)?.status === "queued",
+    8000,
+    "Colab 单进排队",
+  );
+  assert.equal(fake.postCalls.length, 1);
+  const body = JSON.parse(fake.postCalls[0].body);
+  assert.equal(body.useUpscale, false);
+});
+
+test("regenerateJob Colab：3B 关保持关（新单按原选择重放，中转收到的也是关）", async () => {
+  resetFake();
+  await clearActiveJobs();
+  const job = await submitJob({ model: "qwen", prompt: "colab regen 3b off test", backend: "colab", useColabUpscale: false });
+  await waitFor(
+    () => getJobs().find((j) => j.id === job.id)?.status === "queued",
+    8000,
+    "Colab 单进排队",
+  );
+  let body = JSON.parse(fake.postCalls[0].body);
+  assert.equal(body.useUpscale, false);
+  const cur = getJobs().find((j) => j.id === job.id);
+  fakeRelayJob(cur.colabJobId).status = "done";
+  fakeRelayJob(cur.colabJobId).progress = 100;
+  await __tickForTest();
+  const done = getJobs().find((j) => j.id === job.id);
+  assert.equal(done.status, "done");
+  resetFake();
+  await clearActiveJobs();
+  const regen = await regenerateJob(job.id);
+  assert.equal(regen.backend, "colab");
+  assert.equal(regen.useColabUpscale, false);
+  assert.equal(regen.regeneratedFrom, job.id);
+  await waitFor(
+    () => getJobs().find((j) => j.id === regen.id)?.status === "queued",
+    8000,
+    "重新生成的 Colab 单进排队",
+  );
+  assert.equal(fake.postCalls.length, 1);
+  body = JSON.parse(fake.postCalls[0].body);
+  assert.equal(body.useUpscale, false);
+});
