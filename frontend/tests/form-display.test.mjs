@@ -57,22 +57,17 @@ test("模型/比例下拉框紧凑：框高 36px，内边距与字号配合收�
   assert.match(css, /\.glass-select\s*\{[^}]*padding:\s*0 32px 0 12px/s);
 });
 
-test("后端选择器：模型那一行左边两颗小按钮（Kaggle / Colab），不是复选框", () => {
+test("后端选择器：模型那一行左边两颗椭圆形药丸按钮（Kaggle / Colab），不是复选框", () => {
   // 平台按钮在模型下拉框同一行左边，右边仍是模型下拉框
   assert.match(mainJs, /class="backend-pills"/);
   assert.match(mainJs, /data-backend="kaggle"/);
   assert.match(mainJs, /data-backend="colab"/);
   assert.match(mainJs, /id="model-select"/);
-  // 按钮是 button，不是 LoRA 那种 checkbox
+  // 药丸是 button，不是 LoRA 那种 checkbox
   assert.doesNotMatch(mainJs, /backend-pill[^>]*type="checkbox"/);
   assert.match(mainJs, /class="backend-pill"[^>]*data-backend="kaggle"/);
-  // 形状与模型下拉框完全相同：border-radius 10px（与 .glass-select 一致）；
-  // 尺寸比模型下拉收敛一号：高 30px、内边距 0 10px、字号 13px；点亮态用渐变
-  assert.match(css, /\.backend-pill\s*\{[^}]*border-radius:\s*10px/s);
-  assert.match(css, /\.backend-pill\s*\{[^}]*height:\s*30px/s);
-  assert.match(css, /\.backend-pill\s*\{[^}]*padding:\s*0 10px/s);
-  assert.match(css, /\.backend-pill\s*\{[^}]*font-size:\s*13px/s);
-  assert.match(css, /\.glass-select\s*\{[^}]*border-radius:\s*10px/s);
+  // 椭圆：border-radius 999px；点亮态用渐变
+  assert.match(css, /\.backend-pill\s*\{[^}]*border-radius:\s*999px/s);
   assert.match(css, /\.backend-pill\.active\s*\{[^}]*linear-gradient/s);
   // 任务列表显示每单走的后端
   assert.match(mainJs, /backend-badge-colab/);
