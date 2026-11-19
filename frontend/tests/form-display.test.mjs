@@ -85,6 +85,21 @@ test("开始生成按钮下方有后端使用说明：优先 Kaggle，队列满�
   );
 });
 
+test("切后端保留各自开关状态：灰掉的开关值不动，切回来还是原来的状态", () => {
+  // 换后端只重渲染盒子、不重置开关值：useUpscale / useColabUpscale 在 main.js
+  // 里各只在两处赋值——初始化（默认开）和开关本身的 change 事件；后端药丸
+  // 的点击处理里没有对它们的赋值，所以 Kaggle 下把 7B 关了、切到 Colab 再
+  // 切回 Kaggle，7B 还是关着的（3B 同理）。
+  assert.equal((mainJs.match(/useUpscale =/g) || []).length, 2, "useUpscale 只应在初始化和 change 时赋值");
+  assert.equal((mainJs.match(/useColabUpscale =/g) || []).length, 2, "useColabUpscale 只应在初始化和 change 时赋值");
+  // 渲染时 checked 从各自变量读、disabled 从后端读：值与可用状态是两回事，
+  // 灰掉只禁点，不改值
+  assert.match(mainJs, /data-upscale \$\{useUpscale \? "checked" : ""\}/);
+  assert.match(mainJs, /data-colab-upscale \$\{useColabUpscale \? "checked" : ""\}/);
+  // 提交时按当前后端取对应开关：Colab 单传 3B 的值，Kaggle 单传 7B 的值
+  assert.match(mainJs, /await submitJob\(\{[\s\S]*?useUpscale,\n\s*useColabUpscale,/);
+});
+
 test("超分 SeedVR 3B 开关：只在 Colab 下可点，Kaggle 下灰掉；7B 开关反过来", () => {
   // 主页上有 3B 开关，文案写明是 SeedVR 3B，跟 7B 开关并排在超分盒子里
   assert.match(mainJs, /超分 SeedVR 3B/);
