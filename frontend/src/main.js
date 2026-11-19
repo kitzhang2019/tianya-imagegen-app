@@ -986,6 +986,7 @@ async function handleJobListClick(e) {
     expandedJobs.delete(id);
     const res = await deleteJob(id);
     if (res && res.ok === false) toast("平台取消失败，任务还留着：请联网后重试删除");
+    else if (res && res.detached) toast("任务已从列表删除，后台继续取图，跑完会进图库");
     return;
   }
   // 点卡片其他地方：展开 / 收起提示词和详情（按钮已在上面处理，不会走到这里）
@@ -1020,6 +1021,7 @@ galleryGridEl.addEventListener("click", async (e) => {
     if (!window.confirm("确定删除这张图吗？本机文件和任务记录都会一起删掉，画廊里的那份不受影响。")) return;
     const res = await deleteJob(Number(delBtn.dataset.delete));
     if (res && res.ok === false) toast("平台取消失败，任务还留着：请联网后重试删除");
+    else if (res && res.detached) toast("任务已从列表删除，后台继续取图，跑完会进图库");
     return;
   }
   const regenBtn = e.target.closest("[data-regen]");

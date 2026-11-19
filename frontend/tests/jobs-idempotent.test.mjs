@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { __seedStore, __resetStore } from "./stubs/capacitor-preferences.mjs";
 import {
+  __resetOrphansForTest,
   __tickForTest,
   deleteJob,
   getJobs,
@@ -183,6 +184,7 @@ test("push 回包丢失：任务进待确认，不标失败", async () => {
   for (const j of getJobs().filter((x) => x.status === "running" || x.status === "preparing" || x.status === "queued-local")) {
     await deleteJob(j.id);
   }
+  await __resetOrphansForTest(); // v1.2.25：删跑着的单会留后台跟踪，清理时一并清掉
   fake.status = "absent";
   fake.list = [];
   fake.push = "down"; // push 请求发出去但回包丢了（代理断开）
@@ -243,6 +245,7 @@ test("retryJob：确认云端没有时才建新任务，复用同一个 slug", a
   for (const j of getJobs().filter((x) => x.status === "running" || x.status === "preparing" || x.status === "queued-local")) {
     await deleteJob(j.id);
   }
+  await __resetOrphansForTest(); // v1.2.25：删跑着的单会留后台跟踪，清理时一并清掉
   fake.status = "absent";
   fake.list = [];
   fake.push = "ok";

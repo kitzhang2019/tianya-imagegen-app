@@ -32,6 +32,7 @@ import { DEFAULT_GALLERY_URL, attachGalleryOrig, pushToGallery } from "./gallery
 const PREF_JOBS = "tianya-imagegen-jobs";
 const PREF_SETTINGS = "tianya-imagegen-settings";
 const PREF_COUNTER = "tianya-imagegen-counter";
+const PREF_ORPHANS = "tianya-imagegen-orphans"; // 已删待取回：任务从列表删了、平台上还在跑的单
 const PREF_ADMIN_PASSWORD = "tianya-imagegen-admin-password";
 
 /** 管理员密码（只存在本机 Preferences，永不写进代码/仓库）。 */
@@ -132,6 +133,11 @@ function isActive(job) {
 let jobs = [];
 let settings = { ...DEFAULT_SETTINGS };
 let counter = 0;
+/** 已删待取回的后台跟踪记录（v1.2.25）：任务从任务列表删了、但平台上已经
+ * 开始生成的单。只存平台任务 id 和取图要用的元数据（模型/种子/尺寸/
+ * LoRA/超分/文件名），不存图片。跑完取图进本地图库后清理；App 重启后
+ * 从 Preferences 恢复，继续跟踪。 */
+let orphans = [];
 let pollTimer = null;
 let inited = false;
 
@@ -160,6 +166,21 @@ function emit() {
 
 export function getJobs() {
   return jobs;
+}
+
+/** 后台跟踪中的已删任务（只读副本，供单测与排障）。 */
+export function getOrphans() {
+  return [...orphans];
+}
+
+async function saveOrphans() {
+  await Preferences.set({ key: PREF_ORPHANS, value: JSON.stringify(orphans) });
+}
+
+/** 仅测试用：清空后台跟踪记录。 */
+export async function __resetOrphansForTest() {
+  orphans = [];
+  await saveOrphans();
 }
 
 export function getSettings() {
@@ -283,6 +304,13 @@ async function loadAll() {
     if (!Array.isArray(jobs)) jobs = [];
   } catch {
     jobs = [];
+  }
+  try {
+    const so = await Preferences.get({ key: PREF_ORPHANS });
+    orphans = so.value ? JSON.parse(so.value) : [];
+    if (!Array.isArray(orphans)) orphans = [];
+  } catch {
+    orphans = [];
   }
   try {
     const ss = await Preferences.get({ key: PREF_SETTINGS });
@@ -1047,37 +1075,348 @@ export async function cancelRemoteJob(job) {
   }
 }
 
+/** 只删本地记录和本机文件（平台上没有活要干时用）。返回 { ok:true }。 */
+async function removeLocalJob(job) {
+  jobs = jobs.filter((j) => j.id !== job.id);
+  await saveJobs();
+  await deleteJobFiles(job);
+  const url = blobUrls.get(job.id);
+  if (url) {
+    URL.revokeObjectURL(url);
+    blobUrls.delete(job.id);
+  }
+  const thumbUrl = thumbBlobUrls.get(job.id);
+  if (thumbUrl) {
+    URL.revokeObjectURL(thumbUrl);
+    thumbBlobUrls.delete(job.id);
+  }
+  pumpQueue();
+  return { ok: true };
+}
+
+/** 取消失败时任务留着：记一条看得见的提示，等联网/配好凭据后重试删除。 */
+async function markCancelFailed(job, error) {
+  updateJob(job.id, {
+    cancelError: String(error).slice(0, 200),
+    stageDetail: "平台取消失败，请重试删除",
+  });
+  await saveJobs();
+}
+
+/** 任务从列表删了、平台上已开始生成：留一条轻量后台跟踪记录（只存平台
+ * 任务 id 和取图要用的元数据），继续轮询它跑完，跑完取图进本地图库。
+ * 不自动推公开画廊——用户在图库里看到图、自己决定传不传。 */
+function orphanFromJob(job) {
+  return {
+    id: job.id,
+    backend: normalizeBackend(job.backend),
+    model: job.model,
+    prompt: job.prompt,
+    ratioKey: job.ratioKey,
+    width: job.width,
+    height: job.height,
+    seed: job.seed,
+    useLora: job.useLora,
+    loraKeys: job.loraKeys,
+    useUpscale: job.useUpscale,
+    useColabUpscale: job.useColabUpscale,
+    kaggleRef: job.kaggleRef,
+    kaggleSlug: job.kaggleSlug,
+    colabJobId: job.colabJobId,
+    autoSwitchedToColab: !!job.autoSwitchedToColab,
+    imageFileName: job.imageFileName,
+    createdAt: job.createdAt,
+    deletedAt: Date.now(),
+    lastError: null,
+    lastCheckedAt: null,
+  };
+}
+
+async function detachJob(job) {
+  orphans = orphans.filter((o) => o.id !== job.id);
+  orphans.push(orphanFromJob(job));
+  await saveOrphans();
+}
+
+async function removeOrphan(id) {
+  orphans = orphans.filter((o) => o.id !== id);
+  await saveOrphans();
+}
+
+/** 后台跟踪跑完/失败后，把记录插回任务列表（跑完 = done，进本地图库；
+ * 失败 = failed，进任务列表当一条看得见的失败记录，不静默丢掉）。 */
+function jobFromOrphan(orphan, status, stage) {
+  return {
+    id: orphan.id,
+    model: orphan.model,
+    prompt: orphan.prompt,
+    ratioKey: orphan.ratioKey,
+    useLora: orphan.useLora,
+    loraKeys: orphan.loraKeys,
+    useUpscale: orphan.useUpscale,
+    useColabUpscale: orphan.useColabUpscale,
+    width: orphan.width,
+    height: orphan.height,
+    seed: orphan.seed,
+    status,
+    stage,
+    stageDetail: "后台继续取图…",
+    kaggleRef: orphan.kaggleRef,
+    backend: orphan.backend,
+    autoSwitchedToColab: orphan.autoSwitchedToColab,
+    colabJobId: orphan.colabJobId,
+    colabProgress: null,
+    kaggleSlug: orphan.kaggleSlug,
+    createdAt: orphan.createdAt,
+    pushedAt: null,
+    verifyDeadlineAt: null,
+    stageStartedAt: Date.now(),
+    runningStartedAt: null,
+    finishedAt: null,
+    error: null,
+    imagePath: null,
+    imageFileName: orphan.imageFileName,
+    webpFileName: null,
+    galleryPushed: null,
+    galleryError: null,
+    galleryOrigPushed: null,
+    galleryOrigError: null,
+    regeneratedFrom: null,
+    regeneratedBy: null,
+    liveActivityId: null,
+    outputResumeToken: null,
+    outputScanned: 0,
+    downloadStartedAt: null,
+    detachedFromDelete: true, // 这条 done 记录是删过的任务后台取回来的
+  };
+}
+
+/** 后台跟踪的单跑完了：插回任务列表走现有下载回存流程（finishJob /
+ * finishColabJob：WebP 先行、PNG 后台补、缩略图、进本地图库），
+ * 不自动推画廊。插回后跟踪记录就清掉——下载本身由任务记录接手，
+ * 断网重试走正常 downloading 流程。 */
+async function reinsertOrphanForDownload(orphan, kaggleUrl) {
+  const job = jobFromOrphan(orphan, "downloading", "downloading");
+  jobs.unshift(job);
+  await saveJobs();
+  await removeOrphan(orphan.id);
+  if (normalizeBackend(orphan.backend) === "colab") {
+    await finishColabJob(job);
+  } else {
+    await finishJob(job, kaggleUrl);
+  }
+}
+
+/** 后台跟踪的单在平台上失败/找不到了：插回一条失败任务进任务列表，
+ * 让用户看得到（不静默丢掉），可以点「重新提交」再试。 */
+async function reinsertOrphanAsFailed(orphan, message) {
+  const job = jobFromOrphan(orphan, "failed", "failed");
+  job.stageDetail = String(message).slice(0, 200);
+  job.error = String(message).slice(0, 1000);
+  job.finishedAt = Date.now();
+  jobs.unshift(job);
+  await saveJobs();
+  await removeOrphan(orphan.id);
+  notifyJob(job, false);
+}
+
+/** 一轮后台跟踪：每个已删待取回的单各查一次平台状态。
+ * Kaggle complete / Colab done -> 插回下载进本地图库；
+ * 平台已失败/找不到 -> 插回失败任务进列表；
+ * 还在跑/排队/断网 -> 继续等（6 小时硬上限到了也插回失败任务，不无限等）。 */
+async function tickOrphans() {
+  for (const orphan of [...orphans]) {
+    if (!orphans.some((o) => o.id === orphan.id) || busyJobs.has(orphan.id)) continue;
+    try {
+      if (Date.now() - orphan.createdAt > QUEUED_BACKSTOP_MS) {
+        await reinsertOrphanAsFailed(orphan, "后台取图超过 6 小时仍没拿到结果图，已自动结束。图库里没有这张图。");
+        continue;
+      }
+      if (normalizeBackend(orphan.backend) === "colab") {
+        await tickColabOrphan(orphan);
+        continue;
+      }
+      await tickKaggleOrphan(orphan);
+    } catch (e) {
+      // 单个后台跟踪失败不打断整轮；记下来，下轮再试
+      orphan.lastError = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+      orphan.lastCheckedAt = Date.now();
+      await saveOrphans().catch(() => undefined);
+    }
+  }
+}
+
+async function tickKaggleOrphan(orphan) {
+  const client = makeClient();
+  const st = await client.kernelStatus(orphan.kaggleRef);
+  if (!orphans.some((o) => o.id === orphan.id)) return;
+  orphan.lastCheckedAt = Date.now();
+  if (!st.error && st.state !== "unknown") setNetworkDown(false);
+  if (st.state === "complete") {
+    const found = await client.findOutputFile(orphan.kaggleRef, orphan.imageFileName, { budgetMs: PROBE_BUDGET_MS });
+    if (found.ok && found.url) {
+      await reinsertOrphanForDownload(orphan, found.url);
+      return;
+    }
+    orphan.lastError = "云端已跑完，但还没翻到结果图，下一轮再找";
+    await saveOrphans();
+    return;
+  }
+  if (st.state === "error") {
+    await reinsertOrphanAsFailed(
+      orphan,
+      `云端运行失败${st.failure ? `：${st.failure}` : "（云端没给具体原因）"}（任务已从列表删除，后台取图时发现它失败了）`,
+    );
+    return;
+  }
+  if (st.state === "queued" || st.state === "running") {
+    await saveOrphans();
+    return;
+  }
+  // unknown：平台上已没了就结束；401 等凭据问题先等着（用户可能去设置里修好）；
+  // 其他查不到时双通道确认一次，确认不在云端就结束，否则探输出列表。
+  if (st.notFound) {
+    await reinsertOrphanAsFailed(orphan, "云端已找不到这单任务（可能已被清掉），后台取图结束。");
+    return;
+  }
+  if (st.error && String(st.error).includes("401")) {
+    orphan.lastError = String(st.error).slice(0, 200);
+    await saveOrphans();
+    return;
+  }
+  const chk = await client.confirmKernelExists(orphan.kaggleRef);
+  if (!chk.exists && !chk.inconclusive) {
+    await reinsertOrphanAsFailed(orphan, "云端已找不到这单任务，后台取图结束。");
+    return;
+  }
+  const has = await client.hasAnyOutputFile(orphan.kaggleRef);
+  if (has === true) {
+    const found = await client.findOutputFile(orphan.kaggleRef, orphan.imageFileName, { budgetMs: PROBE_BUDGET_MS });
+    if (found.ok && found.url) {
+      await reinsertOrphanForDownload(orphan, found.url);
+      return;
+    }
+  }
+  orphan.lastError = st.error ? String(st.error).slice(0, 200) : "状态接口暂时查不到，下一轮再试";
+  await saveOrphans();
+}
+
+async function tickColabOrphan(orphan) {
+  const client = makeColabClient();
+  let remote;
+  try {
+    remote = await client.getJob(orphan.colabJobId);
+  } catch (e) {
+    if (e instanceof ColabError && e.status === 404) {
+      await reinsertOrphanAsFailed(orphan, "中转那边找不到这单任务（404），后台取图结束。");
+      return;
+    }
+    orphan.lastError = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+    orphan.lastCheckedAt = Date.now();
+    await saveOrphans();
+    return;
+  }
+  setNetworkDown(false);
+  orphan.lastCheckedAt = Date.now();
+  if (remote.status === "done") {
+    await reinsertOrphanForDownload(orphan, null);
+    return;
+  }
+  if (remote.status === "failed") {
+    await reinsertOrphanAsFailed(
+      orphan,
+      `Colab 中转：${remote.error || "任务失败（没给具体原因）"}（任务已从列表删除，后台取图时发现它失败了）`,
+    );
+    return;
+  }
+  // queued / running / 不认识的状态：继续等
+  await saveOrphans();
+}
+
 export async function deleteJob(id) {
   const job = jobs.find((j) => j.id === id);
   if (!job) return { ok: true, skipped: "not-found" };
-  // 取消走在删本地记录之前：平台上的 kernel / 中转任务先停掉，确认结果
-  // 之后再删本地。取消失败（断网、凭据不对）时任务留着：记一条看得见的
-  // 提示（任务行 + stageDetail），等联网/配好凭据后重试删除，不要像以前
-  // 那样删完本地记录就当没事了——平台上的任务还会继续占 GPU 位置。
-  const cancel = await cancelRemoteJob(job);
-  if (!cancel.ok) {
-    updateJob(job.id, {
-      cancelError: String(cancel.error).slice(0, 200),
-      stageDetail: "平台取消失败，请重试删除",
-    });
-    await saveJobs();
-    return { ok: false, error: cancel.error };
+  // 已完结的任务：平台上没有活要干，也不要自动推画廊——只删本地记录和文件。
+  if (isTerminal(job)) return removeLocalJob(job);
+  const backend = normalizeBackend(job.backend);
+  if (backend === "colab") {
+    if (!job.colabJobId) return removeLocalJob(job);
+    let remote;
+    try {
+      requireCreds("colab");
+      remote = await makeColabClient().getJob(job.colabJobId);
+    } catch (e) {
+      // 404 = 中转那边已没这单：没什么可取消/可取的，直接删本地
+      if (e instanceof ColabError && e.status === 404) return removeLocalJob(job);
+      // 查不到状态按“已开始”处理：不断言它还在排队、不取消，留后台跟踪等它跑完取图
+      await detachJob(job);
+      const removed = await removeLocalJob(job);
+      return { ...removed, detached: true };
+    }
+    if (remote.status === "queued") {
+      // 还在排队（没开始生成）：取消中转任务，再删本地记录
+      const cancel = await cancelRemoteJob(job);
+      if (!cancel.ok) {
+        await markCancelFailed(job, cancel.error);
+        return { ok: false, error: cancel.error };
+      }
+      return removeLocalJob(job);
+    }
+    if (remote.status === "failed") return removeLocalJob(job);
+    // running / done / 不认识的状态：已经开始生成，GPU 的活已经花了，不取消；
+    // 任务记录从列表删掉，后台继续跟踪跑完，成品图取回进本地图库
+    await detachJob(job);
+    const removed = await removeLocalJob(job);
+    return { ...removed, detached: true };
   }
-  jobs = jobs.filter((j) => j.id !== id);
-  await saveJobs();
-  await deleteJobFiles(job);
-  const url = blobUrls.get(id);
-  if (url) {
-    URL.revokeObjectURL(url);
-    blobUrls.delete(id);
+  // Kaggle
+  if (!job.kaggleRef) return removeLocalJob(job);
+  let st;
+  try {
+    requireCreds("kaggle");
+    st = await makeClient().kernelStatus(job.kaggleRef);
+  } catch (e) {
+    // 状态接口直接抛错（断网等）：查不到状态按“已开始”处理，留后台跟踪
+    await detachJob(job);
+    const removed = await removeLocalJob(job);
+    return { ...removed, detached: true };
   }
-  const thumbUrl = thumbBlobUrls.get(id);
-  if (thumbUrl) {
-    URL.revokeObjectURL(thumbUrl);
-    thumbBlobUrls.delete(id);
+  if (st.notFound) return removeLocalJob(job);
+  if (st.state === "queued") {
+    // 还在排队（没开始生成）：停掉 kernel，再删本地记录
+    const cancel = await cancelRemoteJob(job);
+    if (!cancel.ok) {
+      await markCancelFailed(job, cancel.error);
+      return { ok: false, error: cancel.error };
+    }
+    return removeLocalJob(job);
   }
-  pumpQueue();
-  return { ok: true, alreadyGone: cancel.alreadyGone ?? false };
+  if (st.state === "running" || st.state === "complete") {
+    // 已经开始生成或已跑完：不取消，留后台跟踪跑完取图进本地图库
+    await detachJob(job);
+    const removed = await removeLocalJob(job);
+    return { ...removed, detached: true };
+  }
+  if (st.state === "error") return removeLocalJob(job);
+  // unknown：先看有没有输出文件，有就当已开始（留后台跟踪）；没有且问得到
+  // 就按没开始处理走取消；问不到（断网）就当已开始留后台跟踪。
+  const has = await makeClient().hasAnyOutputFile(job.kaggleRef).catch(() => null);
+  if (has === true) {
+    await detachJob(job);
+    const removed = await removeLocalJob(job);
+    return { ...removed, detached: true };
+  }
+  if (has === false && st.error && !isNetworkErrorText(st.error)) {
+    const cancel = await cancelRemoteJob(job);
+    if (!cancel.ok) {
+      await markCancelFailed(job, cancel.error);
+      return { ok: false, error: cancel.error };
+    }
+    return removeLocalJob(job);
+  }
+  await detachJob(job);
+  const removed = await removeLocalJob(job);
+  return { ...removed, detached: true };
 }
 
 function activeCount() {
@@ -2107,6 +2446,8 @@ async function tick() {
       }
     }
   }
+  // 后台跟踪：已删待取回的单各查一次平台状态，跑完取图进本地图库
+  await tickOrphans();
   // 每轮顺带同步一次常驻活动的进度（内部 15 秒节流；阶段变化时 updateJob 里已立即同步）
   for (const job of jobs.filter(isActive)) syncLiveActivity(job);
 }

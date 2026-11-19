@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { __seedStore, __readStore, __resetStore } from "./stubs/capacitor-preferences.mjs";
 import {
   QUEUE_CHECK_AFTER_MS,
+  __resetOrphansForTest,
   __tickForTest,
   deleteJob,
   estimateTotalMs,
@@ -318,4 +319,5 @@ test("10 分钟后刷新备注；离开排队后停止刷新", async () => {
   for (const j of getJobs().filter((x) => x.status === "running")) {
     await deleteJob(j.id);
   }
+  await __resetOrphansForTest(); // v1.2.25：删跑着的单会留后台跟踪，清理时一并清掉
 });

@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { __seedStore, __resetStore } from "./stubs/capacitor-preferences.mjs";
 import { Filesystem, __resetFiles } from "./stubs/capacitor-filesystem.mjs";
 import {
+  __resetOrphansForTest,
   __tickForTest,
   deleteJob,
   getJobProgress,
@@ -325,6 +326,8 @@ async function clearActiveJobs() {
   for (const j of getJobs().filter((x) => ["running", "queued", "preparing", "queued-local", "downloading"].includes(x.status))) {
     await deleteJob(j.id);
   }
+  // v1.2.25：删跑着的单会留后台跟踪记录，清理时一并清掉，别让它在后面的轮询里复活
+  await __resetOrphansForTest();
 }
 
 test("regenerateJob 保持 Colab 后端", async () => {
@@ -389,6 +392,7 @@ test("Kaggle 单不受影响：没 backend 的老任务仍走 Kaggle 校验", as
   for (const j of getJobs().filter((x) => ["running", "queued", "preparing", "queued-local", "downloading"].includes(x.status))) {
     await deleteJob(j.id);
   }
+  await __resetOrphansForTest();
 });
 
 // --- 超分 SeedVR 3B 开关（v1.2.23）：只管 Colab，默认开；中转收到的
