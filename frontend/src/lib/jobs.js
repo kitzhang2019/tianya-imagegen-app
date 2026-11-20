@@ -1350,7 +1350,7 @@ async function tickColabOrphan(orphan) {
   if (remote.status === "failed") {
     await reinsertOrphanAsFailed(
       orphan,
-      `Colab 中转：${remote.error || "任务失败（没给具体原因）"}（任务已从列表删除，后台取图时发现它失败了）`,
+      `${honestColabFailureMessage(remote.error)}（任务已从列表删除，后台取图时发现它失败了）`,
     );
     return;
   }
@@ -2318,6 +2318,117 @@ async function finishJob(job, discovered = null) {
   }
 }
 
+/** 中转失败文案翻成诚实的 App 文案（v1.2.27）。
+ * 中转 release 接口的 note 是固定文案（“已重新排队”）：守护进程两次
+ * 分配不到 T4 就会调 release，文案写“已重新排队”，但第二次 release 后
+ * 任务其实是 failed——并没有真的重排。原样展示会让用户以为单子还在排队、
+ * 干等着。映射规则：原因（T4 503/容量不足）原样保留，结论改成“已失败、
+ * 请点重新提交”，绝不出现“已重新排队”。 */
+export function honestColabFailureMessage(remoteError) {
+  const raw = String(remoteError || "").trim();
+  if (!raw) return "Colab 中转返回失败（没给具体原因）。";
+  if (/released too many times/i.test(raw)) {
+    return "Colab 中转：多次未能分配 T4，任务已失败。可以点「重新提交」再试。";
+  }
+  if (raw.includes("已重新排队")) {
+    const cause = raw.replace(/[，,、]?\s*已重新排队\s*[。]?/g, "").trim();
+    if (!cause) return "Colab 中转：任务已失败（没有重新排队）。可以点「重新提交」再试。";
+    return `Colab 中转：${cause}。任务已失败，可以点「重新提交」再试。`;
+  }
+  return `Colab 中转：${raw}`;
+}
+
+/** Colab 单超时前的最后一次中转核对（v1.2.27，KV 上限事故的教训）。
+ * 排队 6 小时 / 生成 2 小时到了，直接判失败会把中转刚好跑完的图丢掉
+ * （cb-mwnioez0-4ac4 就是这么丢的：App 判失败停轮询后，中转 08:03 领走、
+ * 08:20 跑完，图却再也没下来）。所以判失败前先 GET /job/<id> 核对一次：
+ *  - done -> 直接取图、标完成，不判失败；
+ *  - failed -> 按中转的失败原因判失败（文案走 honestColabFailureMessage）；
+ *  - queued/running -> 中转也确认没跑完，才判失败；
+ *  - 联系不上中转（网络断开 / 500 等）-> 这轮先不判失败，写一句备注、
+ *    下一轮再核对；401/404 是明确拒绝，直接判失败。
+ * 返回 true = 已处理（取图或已判失败），false = 核对不上、这轮先不判失败。 */
+async function failColabJobOnTimeout(job, timeoutMessage) {
+  if (!job.colabJobId) {
+    await failJob(job, timeoutMessage);
+    return true;
+  }
+  const client = makeColabClient();
+  let remote;
+  try {
+    remote = await client.getJob(job.colabJobId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (e instanceof ColabError && (e.status === 401 || e.status === 404)) {
+      await failJob(job, msg);
+      return true;
+    }
+    setNetworkDown(true);
+    updateJob(job.id, {
+      stageDetail: "已超时，正在向 Colab 中转做最后确认…（网络暂时断开，恢复后继续确认）",
+    });
+    await saveJobs();
+    return false;
+  }
+  setNetworkDown(false);
+  if (remote.status === "done") {
+    await finishColabJob(job);
+    return true;
+  }
+  if (remote.status === "failed") {
+    await failJob(job, honestColabFailureMessage(remote.error));
+    return true;
+  }
+  await failJob(job, timeoutMessage);
+  return true;
+}
+
+/** 已超时判失败的 Colab 单的恢复核查（v1.2.27）。
+ * 超时判失败只代表“App 当时没等到”，中转可能随后跑完；用户打开 App 或
+ * 刷新时，对每单失败的 Colab 任务最多每 10 分钟向中转核对一次：
+ *  - done -> 取图回来、标完成，不重提、不重新提交；
+ *  - 还没跑完（queued/running/failed）或中转明确说没这单了（401/404）
+ *    -> 只记一次核查时间，等下次再核对，不改失败状态；
+ *  - 联系不上中转 -> 不记时间，下一轮再试。
+ * 不自动重提、不重新提交：恢复旧单取图是唯一动作。 */
+async function recoverFailedColabJobs() {
+  if (!settings.relayKey) return;
+  const now = Date.now();
+  const candidates = jobs.filter(
+    (j) =>
+      normalizeBackend(j.backend) === "colab" &&
+      j.status === "failed" &&
+      j.colabJobId &&
+      !busyJobs.has(j.id) &&
+      (!j.colabRecoveryCheckedAt || now - j.colabRecoveryCheckedAt > QUEUE_CHECK_INTERVAL_MS),
+  );
+  for (const job of candidates) {
+    let remote;
+    try {
+      remote = await makeColabClient().getJob(job.colabJobId);
+    } catch (e) {
+      if (e instanceof ColabError && (e.status === 401 || e.status === 404)) {
+        updateJob(job.id, { colabRecoveryCheckedAt: now });
+        await saveJobs();
+        continue;
+      }
+      setNetworkDown(true);
+      continue;
+    }
+    const current = jobs.find((j) => j.id === job.id);
+    if (!current || current.status !== "failed") continue;
+    if (remote.status === "done") {
+      setNetworkDown(false);
+      updateJob(job.id, { stageDetail: "中转已跑完，正在取回结果图…", error: null });
+      await saveJobs();
+      await finishColabJob(job);
+      continue;
+    }
+    updateJob(job.id, { colabRecoveryCheckedAt: now });
+    await saveJobs();
+  }
+}
+
 /** Colab 单的一次轮询：GET /job/<id> 查中转的状态。
  * done -> 取图；failed -> 判失败；queued/running -> 更新进度
  * （中转上报的 progress 直接进进度环，见 getJobProgress）；
@@ -2351,7 +2462,7 @@ async function tickColabJob(job) {
     return;
   }
   if (status === "failed") {
-    await failJob(job, remote.error ? `Colab 中转：${remote.error}` : "Colab 中转返回失败（没给具体原因）。");
+    await failJob(job, honestColabFailureMessage(remote.error));
     return;
   }
   if (status === "queued" || status === "running") {
@@ -2459,13 +2570,23 @@ async function tick() {
       // queued / running
       if (normalizeBackend(job.backend) === "colab" ? !job.colabJobId : !job.kaggleRef) continue;
       if (now - job.createdAt > QUEUED_BACKSTOP_MS && job.status === "queued") {
-        await failJob(job, "云端排队超过 6 小时仍没开始，已自动结束。可以点「重新提交」再试。");
+        // Colab 单超时前先向中转做一次最后核对（v1.2.27）：中转可能刚好跑完，
+        // 跑完就取图、别判失败；核对不上就这轮先不判失败。
+        if (normalizeBackend(job.backend) === "colab") {
+          await failColabJobOnTimeout(job, "云端排队超过 6 小时仍没开始，已自动结束。可以点「重新提交」再试。");
+        } else {
+          await failJob(job, "云端排队超过 6 小时仍没开始，已自动结束。可以点「重新提交」再试。");
+        }
         continue;
       }
       // 生成中超过 2 小时：kernel 一直回 running 也不能无限等（与管理站生成
       // 2 小时失败线对齐）。stageStartedAt 是进入 running 阶段的时间。
       if (job.status === "running" && now - (job.stageStartedAt || job.createdAt) > RUNNING_BACKSTOP_MS) {
-        await failJob(job, "生成超过 2 小时未完成，已自动结束。可以点「重新提交」再试。");
+        if (normalizeBackend(job.backend) === "colab") {
+          await failColabJobOnTimeout(job, "生成超过 2 小时未完成，已自动结束。可以点「重新提交」再试。");
+        } else {
+          await failJob(job, "生成超过 2 小时未完成，已自动结束。可以点「重新提交」再试。");
+        }
         continue;
       }
       if (normalizeBackend(job.backend) === "colab") {
@@ -2544,6 +2665,9 @@ async function tick() {
       }
     }
   }
+  // 已超时判失败的 Colab 单恢复核查（v1.2.27）：用户打开 App 或刷新时，
+  // 对失败的 Colab 任务向中转核对一次，跑完了就取图回来、不重提。
+  await recoverFailedColabJobs();
   // 后台跟踪：已删待取回的单各查一次平台状态，跑完取图进本地图库
   await tickOrphans();
   // 每轮顺带同步一次常驻活动的进度（内部 15 秒节流；阶段变化时 updateJob 里已立即同步）
