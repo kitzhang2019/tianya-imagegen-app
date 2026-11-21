@@ -45,6 +45,7 @@ import {
   saveSettings,
   setAdminPassword,
   submitJob,
+  switchToColabJob,
 } from "./lib/jobs.js";
 
 const MAX_PROMPT = 10000;
@@ -472,6 +473,7 @@ function jobItemHtml(job) {
         <div class="job-actions">
           ${done && src ? `<button type="button" class="thumb-btn" data-view="${job.id}"><img src="${esc(src)}" alt="结果图" loading="lazy" /></button>` : ""}
           ${failed ? `<button type="button" class="mini-btn" data-retry="${job.id}">重新提交</button>` : ""}
+          <button type="button" class="mini-btn" data-switch-colab="${job.id}"${failed ? "" : " disabled"}>切换到 Colab</button>
           ${failed && job.failedAtDownload ? `<button type="button" class="mini-btn primary" data-redownload="${job.id}">重新下载</button>` : ""}
           ${job.status === "downloading" ? `<button type="button" class="mini-btn" data-refetch="${job.id}">重新取回</button>` : ""}
           <button type="button" class="mini-btn danger" data-delete="${job.id}">删除</button>
@@ -983,6 +985,20 @@ async function handleJobListClick(e) {
       const retried = await retryJob(retriedId);
       // retryJob 可能恢复云端还在跑的旧单（同 id），也可能新开一单（新 id）
       toast(retried.id === retriedId ? "云端这单还在，正在继续轮询" : "已用新种子重新提交");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err));
+    }
+    return;
+  }
+  // 「切换到 Colab」：失败任务用原设置新开一单走 Colab；成功/进行中的任务
+  // 按钮是灰的（disabled，本身点不到），这里只是兜底。
+  const switchBtn = e.target.closest("[data-switch-colab]");
+  if (switchBtn) {
+    if (switchBtn.disabled) return;
+    switchBtn.disabled = true;
+    try {
+      await switchToColabJob(Number(switchBtn.dataset.switchColab));
+      toast("已切换到 Colab 重新提交");
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err));
     }

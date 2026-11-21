@@ -680,6 +680,10 @@ textarea {
 .mini-btn.primary:disabled {
   opacity: 0.55;
 }
+.mini-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .gallery-head-actions {
   display: flex;
   gap: 8px;

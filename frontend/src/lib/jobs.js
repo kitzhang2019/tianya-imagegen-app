@@ -743,6 +743,23 @@ export async function regenerateJob(id) {
   return job;
 }
 
+/** 切换到 Colab：失败任务用原设置新开一单走 Colab（新任务号、新种子）。\n * 只允许失败的任务切——成功/进行中的任务请走正常流程；UI 层也会把按钮\n * 置灰，这里再拦一道。Colab 单没有 kaggleSlug，submitJob 里 backend=colab\n * 时自动记 null。LoRA 选择与超分开关原样带上。 */
+export async function switchToColabJob(id) {
+  const old = jobs.find((j) => j.id === id);
+  if (!old) throw new Error("找不到这条任务");
+  if (old.status !== "failed") throw new Error("只有失败的任务才能切换到 Colab");
+  return submitJob({
+    model: old.model,
+    prompt: old.prompt,
+    ratioKey: old.ratioKey || "auto",
+    useLora: old.useLora,
+    loraKeys: old.loraKeys,
+    useUpscale: old.useUpscale,
+    useColabUpscale: old.useColabUpscale,
+    backend: "colab",
+  });
+}
+
 /** 找一对重新生成关联里另一张已完成的图（原图或新图），没有返回 null。 */
 export function getRegenPair(job) {
   if (!job) return null;
