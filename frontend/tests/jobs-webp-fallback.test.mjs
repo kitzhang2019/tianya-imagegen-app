@@ -1,17 +1,22 @@
-// tests/jobs-webp-fallback.test.mjs — finishJob 的 WebP 兜底：PNG 下不下来时改下
-// 同名 WebP 当主图，整单不再死。跑法：npm test。fetch 桩模拟 Kaggle API，
-// Filesystem 桩用内存文件表；createImageBitmap 在 Node 里不存在，缩略图会
-// 静默失败（不影响出图），这是预期的。
-import { test, after } from "node:test";
+// tests/jobs-webp-fallback.test.mjs — WebP 失败回退 PNG（v3.0：中转版）：
+// 中转跑完后：
+// ① /webp 404（中转还没备好 WebP）→ 改下 PNG，任务照样完成；
+// ② /webp 返回错魔数（不是 WebP）→ 改下 PNG，任务照样完成；
+// ③ WebP 和 PNG 都 404 → 留在 downloading 等下一轮，不判失败。
+// 跑法：npm test。fetch 桩模拟 Colab 中转；Filesystem 桩用内存文件表。
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { __seedStore, __resetStore } from "./stubs/capacitor-preferences.mjs";
-import { __resetFiles } from "./stubs/capacitor-filesystem.mjs";
+import { Filesystem, __resetFiles } from "./stubs/capacitor-filesystem.mjs";
 import {
   __tickForTest,
   getJobs,
   initJobs,
+  saveSettings,
   stopPolling,
 } from "../src/lib/jobs.js";
+import { COLAB_RELAY_BASE } from "../src/lib/colab.js";
+import { outputFileName } from "../src/lib/notebook.js";
 
 const realFetch = globalThis.fetch;
 after(() => {
@@ -32,9 +37,9 @@ async function waitFor(cond, timeoutMs = 8000, what = "条件") {
   throw new Error(`超时未达成：${what}`);
 }
 
-const WEBP_BYTES = new Uint8Array([
-  0x52, 0x49, 0x46, 0x46, 0x10, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
-]);
+const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+// 错魔数：PNG 开头却走了 /webp
+const BAD_WEBP_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 9, 9]);
 
 function jsonRes(status, obj) {
   const text = JSON.stringify(obj);
@@ -53,50 +58,151 @@ function bytesRes(bytes) {
     ok: true,
     headers: { get: () => "application/octet-stream" },
     text: async () => "",
-    arrayBuffer: async () => bytes.buffer.slice(0),
+    arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
   };
 }
 
-globalThis.fetch = async (url) => {
+// 可编程的中转行为（每个测试按需改）
+const fake = {
+  jobs: new Map(), // colabJobId -> { status, progress, stage, error }
+  webpMode: "404", // "404" | "bad-magic" | "both-404"
+  pngMode: "good", // "good" | "404"
+  downloadOrder: [],
+};
+
+function fakeRelayJob(id) {
+  if (!fake.jobs.has(id)) fake.jobs.set(id, { id, status: "queued", progress: 0, stage: "排队中" });
+  return fake.jobs.get(id);
+}
+
+function resetFake() {
+  fake.jobs.clear();
+  fake.webpMode = "404";
+  fake.pngMode = "good";
+  fake.downloadOrder = [];
+}
+
+globalThis.fetch = async (url, opts) => {
   const u = String(url);
-  if (u.includes("GetKernelSessionStatus")) return jsonRes(200, { status: "COMPLETE" });
-  if (u.includes("ListKernelSessionOutput")) {
-    return jsonRes(200, {
-      files: [
-        { fileName: "moss_dash_4.png", url: "https://www.kaggleusercontent.com/x/moss_dash_4.png" },
-        { fileName: "moss_dash_4.webp", url: "https://www.kaggleusercontent.com/x/moss_dash_4.webp" },
-      ],
-    });
+  const mDl = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/job/([^/]+)/(webp|png)$`));
+  if (mDl) {
+    const [, , format] = mDl;
+    fake.downloadOrder.push(format);
+    if (format === "webp") {
+      if (fake.webpMode === "404" || fake.webpMode === "both-404") return jsonRes(404, { ok: false, error: "not found" });
+      if (fake.webpMode === "bad-magic") return bytesRes(BAD_WEBP_BYTES);
+      return bytesRes(PNG_BYTES);
+    }
+    if (fake.pngMode === "404" || fake.webpMode === "both-404") return jsonRes(404, { ok: false, error: "not found" });
+    return bytesRes(PNG_BYTES);
   }
-  // PNG 下载回的不是 PNG 内容（魔数不对）——downloadPng 立即报错不重试；
-  // WebP 下载回合法 WebP，兜底走得通。
-  if (u.includes("moss_dash_4.webp")) return bytesRes(WEBP_BYTES);
-  if (u.includes("moss_dash_4.png")) return bytesRes(new Uint8Array([0, 0, 0, 0]));
+  const mGet = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/job/([^/]+)$`));
+  if (mGet) {
+    return jsonRes(200, { ok: true, job: fakeRelayJob(mGet[1]) });
+  }
   throw new Error(`测试桩没预料到的请求：${u}`);
 };
 
-test("finishJob：PNG 下不下来时改下同名 WebP 当主图，任务完成且 imageFileName 是 .webp", async () => {
-  const now = Date.now();
+function seedJob(id, extra) {
+  return {
+    id,
+    model: "moss",
+    prompt: `webp fallback test ${id}`,
+    ratioKey: "auto",
+    width: 1280,
+    height: 1920,
+    seed: 6000 + id,
+    status: "running",
+    stage: "running",
+    backend: "kaggle",
+    colabJobId: `cb-wfb-${id}`,
+    colabProgress: null,
+    kaggleRef: null,
+    kaggleSlug: `app-moss-comfyui-kaggle-${id}`,
+    createdAt: Date.now(),
+    pushedAt: Date.now(),
+    verifyDeadlineAt: null,
+    stageStartedAt: Date.now(),
+    runningStartedAt: Date.now(),
+    finishedAt: null,
+    error: null,
+    imageFileName: outputFileName("moss", id),
+    webpFileName: null,
+    downloadStartedAt: null,
+    ...extra,
+  };
+}
+
+function job(id) {
+  return getJobs().find((j) => j.id === id);
+}
+
+before(async () => {
+  await saveSettings({ relayKey: "test-relay-key", galleryKey: "", galleryUrl: "" });
+});
+
+test("预置：3 个 Kaggle running 单（71 webp 404、72 webp 错魔数、73 两路都 404）", async () => {
+  resetFake();
   __seedStore({
-    "tianya-imagegen-settings": JSON.stringify({ kaggleUsername: "u", kaggleToken: "t", galleryKey: "", galleryUrl: "" }),
-    "tianya-imagegen-jobs": JSON.stringify([
-      {
-        id: 4, model: "moss", prompt: "p", seed: 1, width: 2560, height: 3840, ratioKey: "r2x3v",
-        status: "running", stage: "running", stageDetail: "云端正在生成",
-        createdAt: now - 60000, pushedAt: now - 60000, stageStartedAt: now - 60000,
-        kaggleRef: "u/app-moss-comfyui-kaggle-4", imageFileName: "moss_dash_4.png",
-        loraKeys: ["guanlan"], useUpscale: true,
-      },
-    ]),
-    "tianya-imagegen-counter": "4",
+    "tianya-imagegen-jobs": JSON.stringify([seedJob(71), seedJob(72), seedJob(73)]),
+    "tianya-imagegen-counter": "73",
   });
   await initJobs();
+  stopPolling();
+  await sleep(50);
+  assert.equal(getJobs().length, 3);
+});
+
+test("WebP 404：改下 PNG，任务照样完成", async () => {
+  resetFake();
+  fake.webpMode = "404";
+  fakeRelayJob("cb-wfb-71").status = "done";
+  fakeRelayJob("cb-wfb-71").progress = 100;
   await __tickForTest();
-  await waitFor(() => getJobs()[0]?.status === "done", 8000, "任务完成");
-  const job = getJobs()[0];
-  assert.equal(job.status, "done");
-  assert.equal(job.imageFileName, "moss_dash_4.webp");
-  // WebP 优先（2026-11-16）：主图就是 WebP 时 webpFileName 也指向它（画廊推送
-  // 优先推 WebP，之前老流程里这里是 null、推送会拿错 contentType）。
-  assert.equal(job.webpFileName, "moss_dash_4.webp");
+  await waitFor(() => job(71)?.status === "done", 8000, "71 号单回退 PNG 完成");
+  const j = job(71);
+  assert.equal(j.status, "done");
+  assert.equal(j.imageFileName, "moss_dash_71.png");
+  assert.equal(j.webpFileName, null, "没下到 WebP，webpFileName 留空");
+  // PNG 在本机
+  await Filesystem.readFile({ path: "images/moss_dash_71.png" });
+});
+
+test("WebP 错魔数：改下 PNG，任务照样完成", async () => {
+  resetFake();
+  fake.webpMode = "bad-magic";
+  fakeRelayJob("cb-wfb-72").status = "done";
+  fakeRelayJob("cb-wfb-72").progress = 100;
+  await __tickForTest();
+  await waitFor(() => job(72)?.status === "done", 8000, "72 号单回退 PNG 完成");
+  const j = job(72);
+  assert.equal(j.status, "done");
+  assert.equal(j.imageFileName, "moss_dash_72.png");
+  assert.equal(j.webpFileName, null, "错魔数的 WebP 不认，webpFileName 留空");
+  await Filesystem.readFile({ path: "images/moss_dash_72.png" });
+});
+
+test("WebP 和 PNG 都 404：留在 downloading 等下一轮，不判失败；准备好后取回", async () => {
+  resetFake();
+  fake.webpMode = "both-404";
+  fakeRelayJob("cb-wfb-73").status = "done";
+  fakeRelayJob("cb-wfb-73").progress = 100;
+  await __tickForTest();
+  let j = job(73);
+  assert.equal(j.status, "downloading");
+  assert.match(j.stageDetail || "", /还没准备好/);
+  // 再跑一轮：还是 downloading，不判失败
+  await __tickForTest();
+  j = job(73);
+  assert.equal(j.status, "downloading");
+  // 准备好了：下一轮取回。注意 downloading 分支的下载是后台跑的（不阻塞
+  // tick），上一轮的后台任务可能还没跑完、下一轮会跳过 busy 的单，所以
+  // 多跑几轮、每轮之间留一点时间，直到取回完成。
+  fake.webpMode = "404"; // WebP 仍 404，PNG 好了 → 回退 PNG 完成
+  for (let i = 0; i < 6 && job(73)?.status !== "done"; i++) {
+    await __tickForTest();
+    await sleep(50);
+  }
+  assert.equal(job(73).status, "done");
+  assert.equal(job(73).imageFileName, "moss_dash_73.png");
 });

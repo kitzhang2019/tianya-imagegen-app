@@ -49,8 +49,8 @@ test("版本号从 package.json 注入，不手写死数字", () => {
   // main.js 用注入值填版本行，带 typeof 守卫（define 缺失时不报错）
   assert.match(mainJs, /typeof __APP_VERSION__ !== "undefined"/);
   assert.match(mainJs, /appVersionEl\.textContent = __APP_VERSION__/);
-  // 注入源与包版本一致：当前应为 1.2.28
-  assert.equal(pkg.version, "1.2.28");
+  // 注入源与包版本一致：当前应为 3.0.0
+  assert.equal(pkg.version, "3.0.0");
   // main.js 里不出现手写死的版本号文本
   assert.doesNotMatch(mainJs, />1\.2\.5</);
 });

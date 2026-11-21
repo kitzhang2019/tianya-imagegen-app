@@ -17,6 +17,7 @@ import {
   submitJob,
 } from "../src/lib/jobs.js";
 import { upscalerLabelForJob, outputSizeForJob } from "../src/lib/notebook.js";
+import { COLAB_RELAY_BASE } from "../src/lib/colab.js";
 
 const realFetch = globalThis.fetch;
 
@@ -42,8 +43,8 @@ function textRes(status, text) {
 }
 
 // fetch 桩：模板按模型读磁盘真文件；retryJob 前的云端核对一律答“没有这单”，
-// 让重提正常建新单；其他 Kaggle 查询答空，后台 runJob 走失败/待确认分支，
-// 不影响这里对任务记录的断言。
+// 让重提正常建新单；POST /job 直接拒掉（400）：这里不测真推，后台 runJob
+// 立刻失败，不进 5 分钟核实循环。
 const templates = {};
 for (const m of ["moss", "qwen", "krea2", "zimage"]) {
   templates[m] = fs.readFileSync(new URL(`../public/notebooks/${m}-comfyui-kaggle.ipynb`, import.meta.url), "utf8");
@@ -54,10 +55,11 @@ globalThis.fetch = async (url, opts) => {
     const m = ["moss", "qwen", "krea2", "zimage"].find((x) => u.includes(x)) || "qwen";
     return textRes(200, templates[m]);
   }
-  if (u.includes("GetKernelSessionStatus")) return jsonRes(404, { error: "not found" });
-  // push 直接拒掉：这里不测真推，后台 runJob 立刻失败，不进 5 分钟核实循环。
-  if (u.includes("/kernels/push")) return jsonRes(400, { error: { message: "测试桩：不真推" } });
-  if (u.includes("kernels/list")) return jsonRes(200, []);
+  if (u === `${COLAB_RELAY_BASE}/job` && (opts?.method || "GET") === "POST") {
+    return jsonRes(400, { ok: false, error: "测试桩：不真推" });
+  }
+  const mGet = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/job/([^/]+)$`));
+  if (mGet) return jsonRes(404, { ok: false, error: "not found" });
   return jsonRes(404, { error: "not found" });
 };
 
@@ -88,7 +90,7 @@ test("老任务兼容：没有 useUpscale 字段的旧任务，重提后按开�
     ]),
     "tianya-imagegen-counter": "41",
   });
-  await saveSettings({ kaggleUsername: "u", kaggleToken: "t", galleryKey: "", galleryUrl: "" });
+  await saveSettings({ relayKey: "test-relay-key", galleryKey: "", galleryUrl: "" });
   await initJobs();
   const retried = await retryJob(41);
   assert.equal(retried.model, "moss");

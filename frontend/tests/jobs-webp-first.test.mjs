@@ -1,18 +1,22 @@
-// tests/jobs-webp-first.test.mjs — finishJob 的 WebP 优先：先下 1.25MB WebP，
-// 存好就先完成任务、让图显示出来；12MB PNG 放后台慢慢下，存好后再把主图
-// 换成 PNG（原图）。跑法：npm test。fetch 桩模拟 Kaggle API，Filesystem
-// 桩用内存文件表；createImageBitmap 在 Node 里不存在，缩略图会静默失败
-// （不影响出图），这是预期的。
-import { test, after } from "node:test";
+// tests/jobs-webp-first.test.mjs — WebP 先行（v3.0：中转版）：
+// 中转跑完后先下轻量 WebP（约 150KB），任务立刻标 done、图立刻能看；
+// 再后台下 PNG 原图（约 1MB），到了再把主图换成 PNG。
+// 跑法：npm test。fetch 桩模拟 Colab 中转；Filesystem 桩用内存文件表。
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { __seedStore, __resetStore } from "./stubs/capacitor-preferences.mjs";
 import { Filesystem, __resetFiles } from "./stubs/capacitor-filesystem.mjs";
 import {
+  __saveJobsForTest,
   __tickForTest,
   getJobs,
   initJobs,
+  refetchJob,
+  saveSettings,
   stopPolling,
 } from "../src/lib/jobs.js";
+import { COLAB_RELAY_BASE } from "../src/lib/colab.js";
+import { outputFileName } from "../src/lib/notebook.js";
 
 const realFetch = globalThis.fetch;
 after(() => {
@@ -55,72 +59,166 @@ function bytesRes(bytes) {
     ok: true,
     headers: { get: () => "application/octet-stream" },
     text: async () => "",
-    arrayBuffer: async () => bytes.buffer.slice(0),
+    arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
   };
 }
 
-// 记录两份图的下载顺序（PNG 故意慢一点，让 WebP 先行完成的状态能被观测到）。
-const downloadOrder = [];
+// 可编程的中转行为（每个测试按需改）
+const fake = {
+  jobs: new Map(), // colabJobId -> { status, progress, stage, error }
+  pngMode: "good", // "good" | "gate"（PNG 请求挂起，等测试放行）| "404"
+  pngGate: null, // 放行 PNG 的 resolve 函数
+  downloadOrder: [],
+};
 
-globalThis.fetch = async (url) => {
+function fakeRelayJob(id) {
+  if (!fake.jobs.has(id)) fake.jobs.set(id, { id, status: "queued", progress: 0, stage: "排队中" });
+  return fake.jobs.get(id);
+}
+
+function resetFake() {
+  fake.jobs.clear();
+  fake.pngMode = "good";
+  fake.pngGate = null;
+  fake.downloadOrder = [];
+}
+
+globalThis.fetch = async (url, opts) => {
   const u = String(url);
-  if (u.includes("GetKernelSessionStatus")) return jsonRes(200, { status: "COMPLETE" });
-  if (u.includes("ListKernelSessionOutput")) {
-    return jsonRes(200, {
-      files: [
-        { fileName: "moss_dash_4.png", url: "https://www.kaggleusercontent.com/x/moss_dash_4.png" },
-        { fileName: "moss_dash_4.webp", url: "https://www.kaggleusercontent.com/x/moss_dash_4.webp" },
-      ],
-    });
-  }
-  if (u.includes("moss_dash_4.webp")) {
-    downloadOrder.push("webp");
+  const mDl = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/job/([^/]+)/(webp|png)$`));
+  if (mDl) {
+    const [, , format] = mDl;
+    fake.downloadOrder.push(format);
+    if (format === "png") {
+      if (fake.pngMode === "404") return jsonRes(404, { ok: false, error: "not found" });
+      if (fake.pngMode === "gate") {
+        await new Promise((resolve) => { fake.pngGate = resolve; });
+        fake.pngGate = null;
+      }
+      return bytesRes(PNG_BYTES);
+    }
     return bytesRes(WEBP_BYTES);
   }
-  if (u.includes("moss_dash_4.png")) {
-    downloadOrder.push("png");
-    await sleep(300);
-    return bytesRes(PNG_BYTES);
+  const mGet = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/job/([^/]+)$`));
+  if (mGet) {
+    return jsonRes(200, { ok: true, job: fakeRelayJob(mGet[1]) });
   }
   throw new Error(`测试桩没预料到的请求：${u}`);
 };
 
-test("finishJob：WebP 先下先完成，PNG 后台到了再把主图换成 PNG", async () => {
-  const now = Date.now();
+function seedJob(id, extra) {
+  return {
+    id,
+    model: "moss",
+    prompt: `webp first test ${id}`,
+    ratioKey: "auto",
+    width: 1280,
+    height: 1920,
+    seed: 5000 + id,
+    status: "running",
+    stage: "running",
+    backend: "kaggle",
+    colabJobId: `cb-webp-${id}`,
+    colabProgress: null,
+    kaggleRef: null,
+    kaggleSlug: `app-moss-comfyui-kaggle-${id}`,
+    createdAt: Date.now(),
+    pushedAt: Date.now(),
+    verifyDeadlineAt: null,
+    stageStartedAt: Date.now(),
+    runningStartedAt: Date.now(),
+    finishedAt: null,
+    error: null,
+    imageFileName: outputFileName("moss", id),
+    webpFileName: null,
+    downloadStartedAt: null,
+    ...extra,
+  };
+}
+
+function job(id) {
+  return getJobs().find((j) => j.id === id);
+}
+
+before(async () => {
+  await saveSettings({ relayKey: "test-relay-key", galleryKey: "", galleryUrl: "" });
+});
+
+test("预置：1 个 Kaggle running 单（PNG 挂起，等放行）", async () => {
+  resetFake();
+  fake.pngMode = "gate";
   __seedStore({
-    "tianya-imagegen-settings": JSON.stringify({ kaggleUsername: "u", kaggleToken: "t", galleryKey: "", galleryUrl: "" }),
-    "tianya-imagegen-jobs": JSON.stringify([
-      {
-        id: 4, model: "moss", prompt: "p", seed: 1, width: 2560, height: 3840, ratioKey: "r2x3v",
-        status: "running", stage: "running", stageDetail: "云端正在生成",
-        createdAt: now - 60000, pushedAt: now - 60000, stageStartedAt: now - 60000,
-        kaggleRef: "u/app-moss-comfyui-kaggle-4", imageFileName: "moss_dash_4.png",
-        loraKeys: ["guanlan"], useUpscale: true,
-      },
-    ]),
-    "tianya-imagegen-counter": "4",
+    "tianya-imagegen-jobs": JSON.stringify([seedJob(61)]),
+    "tianya-imagegen-counter": "61",
   });
   await initJobs();
+  stopPolling();
+  await sleep(50);
+  assert.equal(getJobs().length, 1);
+});
+
+test("WebP 先下先完成：PNG 还在后台下时，任务已 done、主图是 WebP", async () => {
+  fakeRelayJob("cb-webp-61").status = "done";
+  fakeRelayJob("cb-webp-61").progress = 100;
   await __tickForTest();
-  // 先等到任务 done 且主图是 WebP（PNG 还在后台下）
+  // 等到任务 done（WebP 已下完、PNG 还挂着）
   await waitFor(
-    () => getJobs()[0]?.status === "done" && getJobs()[0]?.imageFileName === "moss_dash_4.webp",
+    () => job(61)?.status === "done" && job(61)?.imageFileName === "moss_dash_61.webp",
     8000,
     "任务先以 WebP 完成",
   );
-  const mid = getJobs()[0];
-  assert.equal(mid.status, "done");
-  assert.equal(mid.imageFileName, "moss_dash_4.webp");
-  assert.equal(mid.webpFileName, "moss_dash_4.webp");
+  const j = job(61);
+  assert.equal(j.status, "done");
+  assert.equal(j.imageFileName, "moss_dash_61.webp");
+  assert.equal(j.webpFileName, "moss_dash_61.webp");
   // WebP 比 PNG 先下
-  assert.equal(downloadOrder[0], "webp");
-  // 再等后台 PNG 到了，主图换成 PNG
-  await waitFor(() => getJobs()[0]?.imageFileName === "moss_dash_4.png", 8000, "后台 PNG 到了主图换回 PNG");
-  const job = getJobs()[0];
-  assert.equal(job.status, "done");
-  assert.equal(job.imageFileName, "moss_dash_4.png");
-  assert.equal(job.webpFileName, "moss_dash_4.webp");
+  assert.equal(fake.downloadOrder[0], "webp");
+  // PNG 请求已经发出、正在等放行
+  await waitFor(() => fake.downloadOrder.includes("png"), 8000, "PNG 后台请求已发出");
+  // WebP 文件已在本机
+  await Filesystem.readFile({ path: "images/moss_dash_61.webp" });
+});
+
+test("放行 PNG 后：主图换成 PNG，WebP 仍在本地，任务还是 done", async () => {
+  // 放行挂起的 PNG 请求
+  assert.ok(fake.pngGate, "PNG 请求正在等放行");
+  fake.pngGate();
+  await waitFor(() => job(61)?.imageFileName === "moss_dash_61.png", 8000, "后台 PNG 到了主图换回 PNG");
+  const j = job(61);
+  assert.equal(j.status, "done");
+  assert.equal(j.imageFileName, "moss_dash_61.png");
+  assert.equal(j.webpFileName, "moss_dash_61.webp");
   // 两份文件都在本地
-  await Filesystem.readFile({ path: "images/moss_dash_4.webp" });
-  await Filesystem.readFile({ path: "images/moss_dash_4.png" });
+  await Filesystem.readFile({ path: "images/moss_dash_61.webp" });
+  await Filesystem.readFile({ path: "images/moss_dash_61.png" });
+});
+
+test("重新取回也走 WebP 先行：PNG 到了再换回 PNG", async () => {
+  resetFake();
+  fakeRelayJob("cb-webp-61").status = "done";
+  fakeRelayJob("cb-webp-61").progress = 100;
+  // 把 61 号单改成失败在下载（成品在中转），再点重新取回：WebP 先下先完成
+  const job61 = job(61);
+  Object.assign(job61, {
+    status: "failed", stage: "failed",
+    stageDetail: "下载回存重试超过 10 分钟仍没成功，已自动结束。",
+    error: "下载回存重试超过 10 分钟仍没成功，已自动结束。",
+    finishedAt: Date.now() - 10000, downloadStartedAt: Date.now() - 11 * 60 * 1000,
+    failedAtDownload: true,
+  });
+  await __saveJobsForTest();
+  // 先把本地两份图删掉，重新取回才真的走下载
+  await Filesystem.deleteFile({ path: "images/moss_dash_61.png" });
+  await Filesystem.deleteFile({ path: "images/moss_dash_61.webp" });
+  await refetchJob(61);
+  await waitFor(
+    () => job(61)?.status === "done" && job(61)?.imageFileName === "moss_dash_61.png",
+    8000,
+    "重新取回完成",
+  );
+  const j = job(61);
+  assert.equal(j.status, "done");
+  assert.equal(j.imageFileName, "moss_dash_61.png");
+  assert.equal(j.webpFileName, "moss_dash_61.webp");
+  assert.equal(fake.downloadOrder[0], "webp");
 });

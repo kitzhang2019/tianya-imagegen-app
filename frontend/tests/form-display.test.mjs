@@ -77,11 +77,11 @@ test("后端选择器：模型那一行左边两颗椭圆形药丸按钮（Kaggl
   assert.match(mainJs, /relayKey/);
 });
 
-test("开始生成按钮下方有后端使用说明：优先 Kaggle，队列满自动切 Colab", () => {
+test("开始生成按钮下方有后端使用说明：优先 Kaggle，队列满中转重新排队、不自动切 Colab", () => {
   // 说明紧跟在开始生成按钮之后，用已有的 hint 小字样式
   assert.match(
     mainJs,
-    /id="btn-submit"[^>]*>开始生成<\/button>\s*<p class="hint">优先使用 Kaggle，如果 Kaggle 出故障了，使用 Colab 生成。（Kaggle 队列已满自动切换 Colab 生成，Colab 速度可能会慢。）<\/p>/s,
+    /id="btn-submit"[^>]*>开始生成<\/button>\s*<p class="hint">优先使用 Kaggle，如果 Kaggle 出故障了，使用 Colab 生成。（Kaggle 队列已满时中转会重新排队，不会自动切换到 Colab；想走 Colab 请手动切换。）<\/p>/s,
   );
 });
 

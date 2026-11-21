@@ -3,9 +3,10 @@
 # What this does:
 #   1. Checks out the repo, sets up Node 22.
 #   2. Installs frontend deps and builds the Vite web app.
-#      (No backend URL is injected: this app calls the Kaggle API
-#      directly from the phone via Capacitor's native HTTP, and the
-#      Kaggle token is entered by the user in the app's settings.)
+#      (No backend URL is injected: this app submits to the Colab relay
+#      at colab.tianyagk.dpdns.org, which hands Kaggle/Colab jobs to a
+#      server-side daemon; the relay key is entered by the user in the
+#      app's settings.)
 #   3. Scaffolds the Capacitor iOS project if `frontend/ios/` is absent
 #      (`npx cap add ios`), then `npx cap sync ios`.
 #   4. Archives with xcodebuild with code signing disabled and packages

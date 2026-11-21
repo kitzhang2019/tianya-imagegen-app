@@ -1,16 +1,16 @@
-// tests/jobs-redownload.test.mjs — v1.2.28「重新下载」：失败在下载回存的任务
-// （云端已生成完、10 分钟内没下回来）卡片上给「重新下载」按钮，只重试下载
-// 同一份云端成品，不重新提交、不重新生成、不换种子；云端成品已取不回
-// （kernel 已删 / 中转已没这单）时如实说、按钮撤掉；再失败也不判丢，按钮
+// tests/jobs-redownload.test.mjs — v1.2.28「重新下载」（v3.0：中转版）：
+// 失败在下载回存的任务（中转已生成完、10 分钟内没下回来）卡片上给「重新下载」
+// 按钮，只重试下载同一份中转成品，不重新提交、不重新生成、不换种子；中转
+// 成品已取不回（中转已没这单）时如实说、按钮撤掉；再失败也不判丢，按钮
 // 保留可反复点。真实案例：2026-11-21 用户截图，Krea2 Kaggle 单（2560×4544）
 // 下载回存超 10 分钟被判失败，卡片只有「重新提交」（重新生成、白白浪费
-// GPU 时间和额度），图在云端其实还在。
-// 跑法：npm test。fetch 桩模拟 Kaggle API + Colab 中转；Filesystem 桩用内存
-// 文件表；createImageBitmap 在 Node 里不存在，缩略图会静默失败（不影响出图），
+// GPU 时间和额度），图在中转其实还在。
+// 跑法：npm test。fetch 桩模拟 Colab 中转；Filesystem 桩用内存文件表；
+// createImageBitmap 在 Node 里不存在，缩略图会静默失败（不影响出图），
 // 这是预期的。下载桩用 downloadMode 开关：good = 返回真图；oversize = 返回
 // 超过 20MB 的图（下载立即报“超过 20MB 回存上限”，不走 2s/4s 重试退避，
 // 测试跑得快；也不是“内容不对”，不会进 downloadStuck，轮询上限到了会再判失败）。
-import { test, after } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { __seedStore, __resetStore } from "./stubs/capacitor-preferences.mjs";
 import { Filesystem, __resetFiles } from "./stubs/capacitor-filesystem.mjs";
@@ -20,6 +20,7 @@ import {
   getJobs,
   initJobs,
   refetchJob,
+  saveSettings,
   stopPolling,
 } from "../src/lib/jobs.js";
 import { COLAB_RELAY_BASE } from "../src/lib/colab.js";
@@ -47,7 +48,7 @@ const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
 const WEBP_BYTES = new Uint8Array([
   0x52, 0x49, 0x46, 0x46, 0x10, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
 ]);
-// 超过 20MB 回存上限的图：下载立即报“超过 20MB 回存上限”（KaggleError，
+// 超过 20MB 回存上限的图：下载立即报“超过 20MB 回存上限”（ColabError，
 // 不重试、不走退避），且不是“内容不对”，不会进 downloadStuck。
 const OVERSIZE_BYTES = new Uint8Array(21 * 1024 * 1024);
 
@@ -74,47 +75,29 @@ function bytesRes(bytes) {
 
 // 下载开关：good = 返回真图；oversize = 返回超大图（立即失败、不重试）。
 let downloadMode = "good";
-// 22 号单的 kernel 已被删：状态接口回 404。
-const GONE_SLUGS = new Set(["kaggle-22"]);
-
-function slugIdFromBody(opts) {
-  const m = String(opts?.body || "").match(/kaggle-(\d+)/);
-  return m ? Number(m[1]) : 9;
-}
+// 中转任务状态：21/25/31 跑完，22 已没这单（404），23 中转也失败了，24 排队中。
+const relayJobs = new Map([
+  ["cb-rd-21", { id: "cb-rd-21", status: "done", progress: 100, stage: "完成" }],
+  ["cb-rd-23", { id: "cb-rd-23", status: "failed", error: "GPU OOM" }],
+  ["cb-rd-24", { id: "cb-rd-24", status: "queued", progress: 0, stage: "排队中" }],
+  ["cb-rd-25", { id: "cb-rd-25", status: "done", progress: 100, stage: "完成" }],
+  ["cb-rd-31", { id: "cb-rd-31", status: "done", progress: 100, stage: "完成" }],
+]);
 
 globalThis.fetch = async (url, opts) => {
   const u = String(url);
-  // Colab 中转：/job/<id> 查状态，/job/<id>/webp|png 下图。
-  if (u.startsWith(COLAB_RELAY_BASE)) {
-    const m = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}/job/([^/]+)(?:/(webp|png))?$`));
-    if (!m) throw new Error(`测试桩没预料到的请求：${u}`);
-    const [, id, format] = m;
-    if (format === "webp") return bytesRes(WEBP_BYTES);
-    if (format === "png") return bytesRes(PNG_BYTES);
-    if (id === "cb-t31") return jsonRes(200, { ok: true, job: { id, status: "done", progress: 100, stage: "已完成" } });
-    return jsonRes(404, { ok: false, error: "not found" });
-  }
-  // Kaggle：状态接口——22 号单的 kernel 已删，回 404；其余回 COMPLETE。
-  if (u.includes("GetKernelSessionStatus")) {
-    const id = slugIdFromBody(opts);
-    if (GONE_SLUGS.has(`kaggle-${id}`)) return jsonRes(404, { code: 404, message: "Not Found" });
-    return jsonRes(200, { status: "COMPLETE" });
-  }
-  // Kaggle：输出列表——按请求里的任务号回同号成品图。
-  if (u.includes("ListKernelSessionOutput")) {
-    const id = slugIdFromBody(opts);
-    return jsonRes(200, {
-      files: [
-        { fileName: `moss_dash_${id}.png`, url: `https://www.kaggleusercontent.com/x/moss_dash_${id}.png` },
-        { fileName: `moss_dash_${id}.webp`, url: `https://www.kaggleusercontent.com/x/moss_dash_${id}.webp` },
-      ],
-    });
-  }
-  // Kaggle：下图（经中转 /dl，URL 里仍带原文件名）。
-  const dl = u.match(/moss_dash_(\d+)\.(webp|png)/);
-  if (dl) {
+  const mDl = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/job/([^/]+)/(webp|png)$`));
+  if (mDl) {
+    const [, , format] = mDl;
     if (downloadMode === "oversize") return bytesRes(OVERSIZE_BYTES);
-    return bytesRes(dl[2] === "webp" ? WEBP_BYTES : PNG_BYTES);
+    if (format === "png") await sleep(300); // PNG 慢半拍，WebP 先行的中间态才看得见
+    return bytesRes(format === "webp" ? WEBP_BYTES : PNG_BYTES);
+  }
+  const mGet = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/job/([^/]+)$`));
+  if (mGet) {
+    const job = relayJobs.get(mGet[1]);
+    if (!job) return jsonRes(404, { ok: false, error: "not found" });
+    return jsonRes(200, { ok: true, job });
   }
   throw new Error(`测试桩没预料到的请求：${u}`);
 };
@@ -126,7 +109,8 @@ function baseJob(id, extra) {
   return {
     id, model: "moss", prompt: "p", seed: id, width: 2560, height: 3840, ratioKey: "r2x3v",
     createdAt: NOW - 60000, pushedAt: NOW - 60000, stageStartedAt: NOW - 60000,
-    kaggleRef: `u/app-moss-comfyui-kaggle-${id}`, imageFileName: `moss_dash_${id}.png`,
+    backend: "kaggle", colabJobId: `cb-rd-${id}`, kaggleRef: null,
+    kaggleSlug: `app-moss-comfyui-kaggle-${id}`, imageFileName: `moss_dash_${id}.png`,
     loraKeys: ["guanlan"], useUpscale: true,
     ...extra,
   };
@@ -134,19 +118,21 @@ function baseJob(id, extra) {
 
 async function seedAndInit() {
   __seedStore({
-    "tianya-imagegen-settings": JSON.stringify({ kaggleUsername: "u", kaggleToken: "t", relayKey: "test-relay-key", galleryKey: "", galleryUrl: "" }),
+    "tianya-imagegen-settings": JSON.stringify({ relayKey: "test-relay-key", galleryKey: "", galleryUrl: "" }),
     "tianya-imagegen-jobs": JSON.stringify([
-      // 21 号单：Kaggle，失败在下载（10 分钟上限到），kernel 还在。
+      // 21 号单：Kaggle，失败在下载（10 分钟上限到），中转成品还在。
       baseJob(21, {
         status: "failed", stage: "failed", stageDetail: "下载回存重试超过 10 分钟仍没成功，已自动结束。",
         error: "下载回存重试超过 10 分钟仍没成功，已自动结束。",
         finishedAt: NOW - 10000, downloadStartedAt: ELEVEN_MIN_AGO, failedAtDownload: true,
+        colabRecoveryCheckedAt: NOW,
       }),
-      // 22 号单：Kaggle，失败在下载，但 kernel 已被删（取不回来了）。
+      // 22 号单：Kaggle，失败在下载，但中转已没这单（取不回来了）。
       baseJob(22, {
         status: "failed", stage: "failed", stageDetail: "下载回存重试超过 10 分钟仍没成功，已自动结束。",
         error: "下载回存重试超过 10 分钟仍没成功，已自动结束。",
         finishedAt: NOW - 10000, downloadStartedAt: ELEVEN_MIN_AGO, failedAtDownload: true,
+        colabRecoveryCheckedAt: NOW,
       }),
       // 23 号单：Kaggle，生成失败（不是下载失败），没有下载失败标记。
       baseJob(23, {
@@ -165,6 +151,7 @@ async function seedAndInit() {
         status: "failed", stage: "failed", stageDetail: "下载回存重试超过 10 分钟仍没成功，已自动结束。",
         error: "下载回存重试超过 10 分钟仍没成功，已自动结束。",
         finishedAt: NOW - 10000, downloadStartedAt: ELEVEN_MIN_AGO, failedAtDownload: true,
+        colabRecoveryCheckedAt: NOW,
       }),
       // 31 号单：Colab，失败在下载，中转那边已跑完。恢复核查时间记成现在，
       // 让 initJobs 那轮轮询跳过自动恢复（本文件测手动重新下载那条路）。
@@ -173,7 +160,7 @@ async function seedAndInit() {
         status: "failed", stage: "failed", stageDetail: "下载回存重试超过 10 分钟仍没成功，已自动结束。",
         error: "下载回存重试超过 10 分钟仍没成功，已自动结束。",
         createdAt: NOW - 60000, pushedAt: NOW - 60000, stageStartedAt: NOW - 60000,
-        backend: "colab", colabJobId: "cb-t31", kaggleRef: null, imageFileName: "krea2_test_31.png",
+        backend: "colab", colabJobId: "cb-rd-31", kaggleRef: null, imageFileName: "krea2_test_31.png",
         finishedAt: NOW - 10000, downloadStartedAt: ELEVEN_MIN_AGO, failedAtDownload: true,
         colabRecoveryCheckedAt: NOW,
       },
@@ -186,6 +173,10 @@ async function seedAndInit() {
   stopPolling();
   await sleep(300);
 }
+
+before(async () => {
+  await saveSettings({ relayKey: "test-relay-key", galleryKey: "", galleryUrl: "" });
+});
 
 test("redownload：Kaggle 失败在下载的单，点重新下载只取回成品、不重新提交", async () => {
   await seedAndInit();
@@ -209,8 +200,8 @@ test("redownload：Kaggle 失败在下载的单，点重新下载只取回成品
   await Filesystem.readFile({ path: "images/moss_dash_21.png" });
 });
 
-test("redownload：kernel 已删的单，点重新下载如实说取不回来、按钮撤掉", async () => {
-  await assert.rejects(() => refetchJob(22), /云端已找不到这单任务.*取不回来/);
+test("redownload：中转已没这单，点重新下载如实说取不回来、按钮撤掉", async () => {
+  await assert.rejects(() => refetchJob(22), /中转那边已经没有这单了，成品取不回来/);
   const job = getJobs().find((j) => j.id === 22);
   assert.equal(job.status, "failed");
   assert.equal(job.failedAtDownload, false, "取不回来就不再是“失败在下载”，按钮撤掉");

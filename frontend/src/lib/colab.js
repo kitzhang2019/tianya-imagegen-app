@@ -79,6 +79,9 @@ export class ColabClient {
 
   // 提交一单。返回 { jobId }。seed 为空时中转会自己随机一个
   // （见 CONNECTOR.md：submitted job echoes back a seed）。
+  // Kaggle 后端（v3.0）额外传 backend="kaggle" + notebookText +
+  // kaggleSlug + datasetSources + title + appJobId，守护进程代劳提交；
+  // Colab 提交不传这些字段（backend 不传或传 "colab"）。
   async submitJob({
     model,
     prompt,
@@ -87,23 +90,36 @@ export class ColabClient {
     loraKeys,
     useLora,
     useUpscale = true,
+    backend,
+    notebookText,
+    kaggleSlug,
+    datasetSources,
+    title,
+    appJobId,
   }) {
+    const body = {
+      model,
+      prompt,
+      ratioKey,
+      seed,
+      loraKeys,
+      useLora,
+      useUpscale,
+      source: "app",
+    };
+    if (backend) body.backend = backend;
+    if (notebookText != null) body.notebookText = notebookText;
+    if (kaggleSlug) body.kaggleSlug = kaggleSlug;
+    if (datasetSources) body.datasetSources = datasetSources;
+    if (title) body.title = title;
+    if (appJobId != null) body.appJobId = appJobId;
     let res;
     try {
       res = await httpRequest({
         url: `${COLAB_RELAY_BASE}/job`,
         method: "POST",
         headers: this._headers({ "content-type": "application/json" }),
-        body: JSON.stringify({
-          model,
-          prompt,
-          ratioKey,
-          seed,
-          loraKeys,
-          useLora,
-          useUpscale,
-          source: "app",
-        }),
+        body: JSON.stringify(body),
         timeoutMs: 60000,
         responseType: "json",
       });

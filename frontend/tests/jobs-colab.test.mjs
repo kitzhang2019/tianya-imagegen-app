@@ -383,7 +383,7 @@ test("refetchJob Colab：downloading 的单重新取图", async () => {
 
 test("Kaggle 单不受影响：没 backend 的老任务仍走 Kaggle 校验", async () => {
   // 老记录没有 backend 字段：normalizeBackend 按 Kaggle 处理，retryJob
-  // 会走 Kaggle 的 confirmKernelExists——这里只断言分发本身不走 Colab。
+  // 会走 Kaggle 提交（中转 backend=kaggle）——这里只断言分发本身不走 Colab。
   resetFake();
   const oldStyle = { ...seedColabJob(95), backend: undefined, colabJobId: null };
   assert.equal(normalizeBackend(oldStyle.backend), "kaggle");

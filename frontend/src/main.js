@@ -104,7 +104,7 @@ app.innerHTML = `
         <div id="upscale-box" class="lora-box"></div>
       </div>
       <button id="btn-submit" class="primary-btn">开始生成</button>
-      <p class="hint">优先使用 Kaggle，如果 Kaggle 出故障了，使用 Colab 生成。（Kaggle 队列已满自动切换 Colab 生成，Colab 速度可能会慢。）</p>
+      <p class="hint">优先使用 Kaggle，如果 Kaggle 出故障了，使用 Colab 生成。（Kaggle 队列已满时中转会重新排队，不会自动切换到 Colab；想走 Colab 请手动切换。）</p>
       <p id="form-error" class="error" hidden></p>
     </div>
   </section>
@@ -937,8 +937,10 @@ submitBtn.addEventListener("click", async () => {
       showFormError("Blender3D LoRA 暂不支持 Colab 路线：换 Kaggle，或取消勾选 Blender3D 再提交。");
       return;
     }
-  } else if (!s.kaggleUsername || !s.kaggleToken) {
-    showFormError("请先在「设置」里完成配置。");
+  } else if (!s.relayKey) {
+    // v3.0：Kaggle 也走中转代劳，提交只要求 Colab 中转密钥，不再要求
+    // Kaggle 用户名/Token（设置页那两个输入框保留不动）。
+    showFormError("请先在「设置」里填好 Colab 中转密钥。");
     switchTab("settings");
     return;
   }

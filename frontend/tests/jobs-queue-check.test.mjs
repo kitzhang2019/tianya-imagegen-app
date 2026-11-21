@@ -1,9 +1,9 @@
-// tests/jobs-queue-check.test.mjs — 排队超时自动核查测试：进排队超 30 分钟
-// 才核查（绝对时长，四模型统一；不再按预估总时长算）、三种核查结论的
-// 括号备注文案、未超时不核查、10 分钟内不重复核查、10 分钟后刷新、
-// 离开排队后停止刷新；上次核查时间随任务持久化。
-// 跑法：npm test。fetch 桩模拟 Kaggle API：GetKernelSessionStatus /
-// ListKernelSessionOutput 按 fake 的设定应答。
+// tests/jobs-queue-check.test.mjs — 排队超时自动核查测试（v3.0：中转版）：
+// 进排队超 30 分钟才核查（绝对时长，四模型统一；不再按预估总时长算）、
+// 核查结论的括号备注文案、未超时不核查、10 分钟内不重复核查、10 分钟后
+// 刷新、离开排队后停止刷新；上次核查时间随任务持久化。中转直接报状态，
+// 不再查 kernel 状态接口或输出列表。
+// 跑法：npm test。fetch 桩模拟 Colab 中转（Kaggle 与 Colab 单通用）。
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { __seedStore, __readStore, __resetStore } from "./stubs/capacitor-preferences.mjs";
@@ -21,7 +21,7 @@ import {
   saveSettings,
   stopPolling,
 } from "../src/lib/jobs.js";
-import { KaggleClient } from "../src/lib/kaggle.js";
+import { COLAB_RELAY_BASE } from "../src/lib/colab.js";
 
 const realFetch = globalThis.fetch;
 
@@ -33,11 +33,10 @@ after(() => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 可编程的云端行为（每个测试按需改）
+// 可编程的中转行为（每个测试按需改）
 const fake = {
-  status: "queued", // "queued" | "running" | "unknown"（不认识的状态值）| "down"（断网）
-  outputFiles: [], // ListKernelSessionOutput 第一页返回的文件
-  deleteCalls: [], // v1.2.25：删任务先调 DeleteKernel 取消云端 kernel
+  jobs: new Map(), // colabJobId -> { status, progress, stage, error }
+  down: false, // true = 查状态直接断网
 };
 
 function jsonRes(status, obj) {
@@ -51,28 +50,26 @@ function jsonRes(status, obj) {
   };
 }
 
+function fakeRelayJob(id) {
+  if (!fake.jobs.has(id)) fake.jobs.set(id, { id, status: "queued", progress: 0, stage: "排队中" });
+  return fake.jobs.get(id);
+}
+
 globalThis.fetch = async (url, opts) => {
   const u = String(url);
-  if (u.includes("DeleteKernel")) {
-    fake.deleteCalls.push(JSON.parse(opts?.body || "{}"));
-    return jsonRes(200, {});
-  }
-  if (u.includes("GetKernelSessionStatus")) {
-    if (fake.status === "down") throw new TypeError("fetch failed");
-    if (fake.status === "running") return jsonRes(200, { status: "RUNNING" });
-    if (fake.status === "queued") return jsonRes(200, { status: "QUEUED" });
-    if (fake.status === "unknown") return jsonRes(200, { status: "SOMETHING_ELSE" });
-    return jsonRes(404, { error: "not found" });
-  }
-  if (u.includes("ListKernelSessionOutput")) {
-    if (fake.status === "down") throw new TypeError("fetch failed");
-    return jsonRes(200, { files: fake.outputFiles, nextPageToken: null });
-  }
-  if (u.includes("kernels/list")) {
-    return jsonRes(200, []);
+  const m = u.match(new RegExp(`^${COLAB_RELAY_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/job/([^/]+)$`));
+  if (m) {
+    if (fake.down) throw new TypeError("fetch failed");
+    // 没配过的单默认排队中（各测试只改自己关心的那单）
+    return jsonRes(200, { ok: true, job: fakeRelayJob(m[1]) });
   }
   throw new Error(`测试桩没预料到的请求：${u}`);
 };
+
+function resetFake() {
+  fake.jobs.clear();
+  fake.down = false;
+}
 
 function seedJob(id, extra) {
   return {
@@ -85,8 +82,11 @@ function seedJob(id, extra) {
     seed: 2000 + id,
     status: "queued",
     stage: "queued",
-    stageDetail: "云端排队中",
-    kaggleRef: `u/app-qwen-comfyui-kaggle-${id}`,
+    stageDetail: "Kaggle：排队中",
+    backend: "kaggle",
+    colabJobId: `cb-qc-${id}`,
+    colabProgress: null,
+    kaggleRef: null,
     kaggleSlug: `app-qwen-comfyui-kaggle-${id}`,
     createdAt: Date.now(),
     pushedAt: Date.now(),
@@ -175,21 +175,20 @@ test("isQueueOverdue：只看排队阶段 + 进排队超 30 分钟（绝对时�
 });
 
 test("预置任务并启动轮询", async () => {
+  resetFake();
   __seedStore({
     "tianya-imagegen-jobs": JSON.stringify([
       seedJob(101), // 未超时不核查
       seedJob(102), // 超时触发：仍在排队
-      seedJob(103), // 未知状态 + 有输出文件
-      seedJob(104), // 未知状态 + 无输出文件
+      seedJob(103), // 超时触发：中转说已跑完
+      seedJob(104), // 超时触发：中转说已失败（不写核查备注）
       seedJob(105), // performQueueCheck 直接调用
       seedJob(106), // 10 分钟后刷新 + 离开排队后停止
       seedJob(107), // 10 分钟内不重复核查
     ]),
     "tianya-imagegen-counter": "107",
   });
-  await saveSettings({ kaggleUsername: "u", kaggleToken: "t", galleryKey: "", galleryUrl: "" });
-  fake.status = "queued";
-  fake.outputFiles = [];
+  await saveSettings({ relayKey: "test-relay-key", galleryKey: "", galleryUrl: "" });
   await initJobs();
   stopPolling();
   await sleep(50); // 让 initJobs 里那轮 tick 跑完（都未超时，不应写任何备注）
@@ -202,8 +201,7 @@ test("预置任务并启动轮询", async () => {
 });
 
 test("未超时不核查", async () => {
-  fake.status = "queued";
-  fake.outputFiles = [];
+  resetFake();
   await __tickForTest();
   const job = jobById(101); // createdAt 就是现在，进排队才 0 分钟，远没到 30 分钟
   assert.equal(job.status, "queued");
@@ -212,9 +210,8 @@ test("未超时不核查", async () => {
   assert.doesNotMatch(job.stageDetail || "", /自动核查/);
 });
 
-test("超时触发核查：状态认出是排队 → 仍在排队，时间随任务持久化", async () => {
-  fake.status = "queued";
-  fake.outputFiles = [];
+test("超时触发核查：中转说仍在排队 → 仍在排队，时间随任务持久化", async () => {
+  resetFake();
   makeOverdue(102);
   await __tickForTest();
   const job = jobById(102);
@@ -237,8 +234,7 @@ test("超时触发核查：状态认出是排队 → 仍在排队，时间随任
 });
 
 test("10 分钟内不重复核查：上次备注原样保留", async () => {
-  fake.status = "queued";
-  fake.outputFiles = [];
+  resetFake();
   const job = makeOverdue(107);
   const checkedAt = Date.now() - 5 * 60 * 1000;
   job.queueCheckAt = checkedAt;
@@ -250,51 +246,46 @@ test("10 分钟内不重复核查：上次备注原样保留", async () => {
   assert.match(cur.stageDetail, /（20:00 自动核查：仍在排队）/);
 });
 
-test("performQueueCheck：三种核查结论", async () => {
-  const client = new KaggleClient({ username: "u", key: "t" });
+test("performQueueCheck：中转状态直断结论", () => {
   const job = jobById(105);
-  // 状态接口直接认出是排队：不用查输出列表
-  assert.equal(await performQueueCheck(job, client, "queued"), "queued");
-  // 状态接口认出是在生成
-  fake.status = "running";
-  assert.equal(await performQueueCheck(job, client, "unknown"), "running");
-  // 状态接口不认识：查输出列表，有文件 → 已有输出文件
-  fake.status = "unknown";
-  fake.outputFiles = [{ fileName: "something.png", url: "https://example.com/something.png" }];
-  assert.equal(await performQueueCheck(job, client, "unknown"), "has-output");
-  // 状态接口不认识：输出列表是空的 → 仍在排队，暂无输出文件
-  fake.outputFiles = [];
-  assert.equal(await performQueueCheck(job, client, "unknown"), "queued-no-output");
-  // 两边都问不到：返回 null，不记时间不写备注
-  fake.status = "down";
-  assert.equal(await performQueueCheck(job, client, "unknown"), null);
+  // 中转说排队：不用再查别的
+  assert.equal(performQueueCheck(job, "queued"), "queued");
+  // 中转说在生成
+  assert.equal(performQueueCheck(job, "running"), "running");
+  // 中转说已跑完：已有成品，主流程下一轮取图
+  assert.equal(performQueueCheck(job, "done"), "has-output");
+  // 中转说已失败：主流程判失败，不写核查备注
+  assert.equal(performQueueCheck(job, "failed"), null);
+  // 不认识的状态：不写备注
+  assert.equal(performQueueCheck(job, "bogus"), null);
+  assert.equal(performQueueCheck(job, null), null);
 });
 
-test("未知状态 + 有输出文件 → 已有输出文件", async () => {
-  fake.status = "unknown";
-  fake.outputFiles = [{ fileName: "something.png", url: "https://example.com/something.png" }];
+test("超时触发核查：中转说已跑完 → 备注已有输出文件，主流程取图", async () => {
+  resetFake();
+  fakeRelayJob("cb-qc-103").status = "done";
   makeOverdue(103);
   await __tickForTest();
   const job = jobById(103);
-  assert.equal(job.status, "queued");
-  assert.match(job.stageDetail, /自动核查：已有输出文件/);
-  assert.ok(job.queueCheckAt);
+  // done 直接走取图：任务完成（取图用桩里的 webp/png——本文件桩没接下载，
+  // 所以这里只断言它进了 downloading、没停在排队写备注）
+  assert.ok(["downloading", "done"].includes(job.status), `103 应已离开排队，实际 ${job.status}`);
 });
 
-test("未知状态 + 无输出文件 → 仍在排队，暂无输出文件", async () => {
-  fake.status = "unknown";
-  fake.outputFiles = [];
+test("超时触发核查：中转说已失败 → 判失败、不写核查备注", async () => {
+  resetFake();
+  fakeRelayJob("cb-qc-104").status = "failed";
+  fakeRelayJob("cb-qc-104").error = "daemon crashed";
   makeOverdue(104);
   await __tickForTest();
   const job = jobById(104);
-  assert.equal(job.status, "queued");
-  assert.match(job.stageDetail, /自动核查：仍在排队，暂无输出文件/);
-  assert.ok(job.queueCheckAt);
+  assert.equal(job.status, "failed");
+  assert.equal(job.queueCheckAt, null);
+  assert.doesNotMatch(job.stageDetail || "", /自动核查/);
 });
 
 test("10 分钟后刷新备注；离开排队后停止刷新", async () => {
-  fake.status = "queued";
-  fake.outputFiles = [];
+  resetFake();
   const job = makeOverdue(106);
   job.queueCheckAt = Date.now() - 11 * 60 * 1000;
   job.queueCheckNote = "（19:00 自动核查：仍在排队）";
@@ -303,8 +294,9 @@ test("10 分钟后刷新备注；离开排队后停止刷新", async () => {
   assert.ok(refreshed.queueCheckAt > Date.now() - 60 * 1000); // 重新核查过
   assert.notEqual(refreshed.queueCheckNote, "（19:00 自动核查：仍在排队）");
   assert.match(refreshed.stageDetail, /自动核查：仍在排队/);
-  // 离开排队：状态接口说在生成，任务进 running；备注不再更新
-  fake.status = "running";
+  // 离开排队：中转说在生成，任务进 running；备注不再更新
+  fakeRelayJob("cb-qc-106").status = "running";
+  fakeRelayJob("cb-qc-106").stage = "生成中";
   await __tickForTest();
   const running = jobById(106);
   assert.equal(running.status, "running");

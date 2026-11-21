@@ -157,6 +157,46 @@ test("submitJob 断网：ColabError，不判成 401", async () => {
   });
 });
 
+test("submitJob Kaggle 后端：backend=kaggle + notebookText + kaggleSlug + datasetSources + title + appJobId 原样透传", async () => {
+  resetFake();
+  const client = new ColabClient({ key: "test-relay-key" });
+  const notebookText = '{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":0}';
+  const { jobId } = await client.submitJob({
+    model: "moss",
+    prompt: "a cat",
+    ratioKey: "auto",
+    seed: 7,
+    loraKeys: ["guanlan"],
+    useUpscale: true,
+    backend: "kaggle",
+    notebookText,
+    kaggleSlug: "app-moss-comfyui-kaggle-9",
+    datasetSources: ["kitzhang2019/seedvr2-7b"],
+    title: "app-moss-comfyui-kaggle-9",
+    appJobId: 9,
+  });
+  assert.equal(jobId, "cb-test-1");
+  assert.equal(fake.calls.length, 1);
+  const body = JSON.parse(fake.calls[0].body);
+  assert.equal(body.backend, "kaggle");
+  assert.equal(body.notebookText, notebookText);
+  assert.equal(body.kaggleSlug, "app-moss-comfyui-kaggle-9");
+  assert.deepEqual(body.datasetSources, ["kitzhang2019/seedvr2-7b"]);
+  assert.equal(body.title, "app-moss-comfyui-kaggle-9");
+  assert.equal(body.appJobId, 9);
+  assert.equal(body.model, "moss");
+  assert.equal(body.source, "app");
+});
+
+test("submitJob Colab：不传 backend 时请求体里没有 backend 字段", async () => {
+  resetFake();
+  const client = new ColabClient({ key: "test-relay-key" });
+  await client.submitJob({ model: "qwen", prompt: "x", useUpscale: true });
+  const body = JSON.parse(fake.calls[0].body);
+  assert.equal("backend" in body, false);
+  assert.equal("notebookText" in body, false);
+});
+
 test("getJob：返回中转的 job 行原样", async () => {
   resetFake();
   const client = new ColabClient({ key: "test-relay-key" });
