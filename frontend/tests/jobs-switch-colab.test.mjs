@@ -1,7 +1,10 @@
 // tests/jobs-switch-colab.test.mjs — v3.0.1：任务卡片「切换到 Colab」按钮。
-// 失败任务用原设置新开一单走 Colab（新任务号、新种子）；成功/进行中的任务
-// 调 switchToColabJob 抛错（UI 层也会把按钮置灰）。跑法：npm test。
-// fetch 桩只接提交（POST /job）与模板读取；Filesystem 桩用内存文件表。
+// 失败任务还是这一单，原地改成走 Colab 再提交：同一个 id、同一个种子、
+// 同一套提示词/模型/LoRA/超分设置，只把后端换成 Colab，状态回到排队，
+// 由 pumpQueue → runColabJob 重新提交（拿新的 colabJobId、进轮询）。
+// 成功/进行中的任务调 switchToColabJob 抛错（UI 层也会把按钮置灰）。
+// 跑法：npm test。fetch 桩只接提交（POST /job）与模板读取；
+// Filesystem 桩用内存文件表。
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -12,7 +15,6 @@ import {
   initJobs,
   saveSettings,
   stopPolling,
-  submitJob,
   switchToColabJob,
 } from "../src/lib/jobs.js";
 import { COLAB_RELAY_BASE } from "../src/lib/colab.js";
@@ -31,6 +33,15 @@ after(() => {
 });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitFor(cond, timeoutMs = 8000, what = "条件") {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (cond()) return;
+    await sleep(20);
+  }
+  throw new Error(`超时未达成：${what}`);
+}
 
 function jsonRes(status, obj) {
   const text = JSON.stringify(obj);
@@ -116,32 +127,47 @@ before(async () => {
   await sleep(50);
 });
 
-test("失败的 Kaggle 任务能切换到 Colab：新单走 colab、设置原样、新种子", async () => {
+test("失败的 Kaggle 任务原地切到 Colab：同一 id、同一种子，后端变 colab，重新提交", async () => {
   const old = getJobs().find((j) => j.id === 401);
   assert.ok(old);
   assert.equal(old.status, "failed");
   const job = await switchToColabJob(401);
-  assert.notEqual(job.id, 401);
-  assert.equal(job.backend, "colab");
-  assert.equal(job.model, old.model);
-  assert.equal(job.prompt, old.prompt);
-  assert.equal(job.ratioKey, old.ratioKey);
+  // 同一条任务：id、种子、提示词、模型、LoRA、超分设置都不变
+  assert.equal(job.id, 401);
+  assert.equal(job.seed, 4401);
+  assert.equal(job.model, "krea2");
+  assert.equal(job.prompt, "switch colab test prompt");
+  assert.equal(job.ratioKey, "auto");
   assert.equal(job.useLora, true);
   assert.equal(job.useUpscale, true);
   assert.equal(job.useColabUpscale, false);
-  assert.notEqual(job.seed, old.seed);
+  // 后端换成 Colab，slug 清掉；提交走 pumpQueue → runColabJob，拿到新的中转任务号
+  assert.equal(job.backend, "colab");
   assert.equal(job.kaggleSlug, null);
-  assert.notEqual(job.status, "failed");
-  // 旧任务不动，还是失败
-  assert.equal(getJobs().find((j) => j.id === 401).status, "failed");
+  await waitFor(() => {
+    const cur = getJobs().find((j) => j.id === 401);
+    return cur && cur.status === "queued" && cur.colabJobId === "cb-test-switch-1";
+  }, 8000, "切换后的任务提交到 Colab");
+  const after = getJobs().find((j) => j.id === 401);
+  assert.equal(after.backend, "colab");
+  assert.equal(after.seed, 4401);
+  assert.equal(after.kaggleSlug, null);
+  assert.notEqual(after.colabJobId, "cb-old-failed");
 });
 
-test("失败的 Colab 任务也能切（等于用新种子重提一单 Colab）", async () => {
+test("失败的 Colab 任务也能切（同一单重提，拿新的中转任务号）", async () => {
   const job = await switchToColabJob(403);
+  assert.equal(job.id, 403);
+  assert.equal(job.seed, 4401);
   assert.equal(job.backend, "colab");
-  assert.equal(job.model, "krea2");
-  assert.equal(job.prompt, "switch colab test prompt");
-  assert.notEqual(job.id, 403);
+  await waitFor(() => {
+    const cur = getJobs().find((j) => j.id === 403);
+    return cur && cur.status === "queued" && cur.colabJobId === "cb-test-switch-2";
+  }, 8000, "切换后的 Colab 任务重新提交");
+  const after = getJobs().find((j) => j.id === 403);
+  assert.equal(after.id, 403);
+  assert.equal(after.seed, 4401);
+  assert.notEqual(after.colabJobId, "cb-old-colab-failed");
 });
 
 test("成功的任务不能切换：抛错", async () => {

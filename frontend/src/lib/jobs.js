@@ -743,21 +743,37 @@ export async function regenerateJob(id) {
   return job;
 }
 
-/** 切换到 Colab：失败任务用原设置新开一单走 Colab（新任务号、新种子）。\n * 只允许失败的任务切——成功/进行中的任务请走正常流程；UI 层也会把按钮\n * 置灰，这里再拦一道。Colab 单没有 kaggleSlug，submitJob 里 backend=colab\n * 时自动记 null。LoRA 选择与超分开关原样带上。 */
+/** 切换到 Colab：还是这一单，原地改成走 Colab 再提交——同一个 id、同一个
+ * 种子、同一套提示词/模型/LoRA/超分设置，只把后端换成 Colab，状态回到本地
+ * 排队，由已有的 pumpQueue → runColabJob 那条路提交到中转（拿新的
+ * colabJobId、进轮询）。只允许失败的任务切——成功/进行中的任务请走正常
+ * 流程；UI 层也会把按钮置灰，这里再拦一道。 */
 export async function switchToColabJob(id) {
   const old = jobs.find((j) => j.id === id);
   if (!old) throw new Error("找不到这条任务");
   if (old.status !== "failed") throw new Error("只有失败的任务才能切换到 Colab");
-  return submitJob({
-    model: old.model,
-    prompt: old.prompt,
-    ratioKey: old.ratioKey || "auto",
-    useLora: old.useLora,
-    loraKeys: old.loraKeys,
-    useUpscale: old.useUpscale,
-    useColabUpscale: old.useColabUpscale,
+  requireCreds("colab");
+  updateJob(old.id, {
     backend: "colab",
+    kaggleSlug: null, // Colab 单不记 slug（submitJob 里就是这么处理的）
+    colabJobId: null, // 重新提交拿新的中转任务号
+    colabProgress: null,
+    status: "queued-local",
+    stage: "queued-local",
+    stageDetail: "已切换到 Colab，重新提交中",
+    error: null,
+    finishedAt: null,
+    pushedAt: null,
+    verifyDeadlineAt: null,
+    runningStartedAt: null,
+    downloadStartedAt: null,
+    downloadStuck: null,
+    failedAtDownload: false,
   });
+  await saveJobs();
+  startLiveActivity(old);
+  pumpQueue();
+  return jobs.find((j) => j.id === id) || old;
 }
 
 /** 找一对重新生成关联里另一张已完成的图（原图或新图），没有返回 null。 */
