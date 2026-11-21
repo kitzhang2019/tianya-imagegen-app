@@ -484,7 +484,11 @@ async function endLiveActivity(job, ok) {
   }
 }
 
-async function failJob(job, message) {
+/** 判失败：默认清除 failedAtDownload（只在下载回存这一步失败时才由调用点
+ * 置 true）。默认清除是为了防止旧标记残留：失败任务经「重新提交」恢复后
+ * 再失败在生成阶段，不能还挂着「重新下载」按钮。extra 只用来传这种
+ * 明确的失败阶段标记。 */
+async function failJob(job, message, extra = {}) {
   updateJob(job.id, {
     status: "failed",
     stage: "failed",
@@ -492,6 +496,8 @@ async function failJob(job, message) {
     error: String(message).slice(0, 1000),
     finishedAt: Date.now(),
     downloadStuck: null,
+    failedAtDownload: false,
+    ...extra,
   });
   await saveJobs();
   notifyJob(job, false);
@@ -630,6 +636,7 @@ export async function retryJob(id) {
       error: null,
       finishedAt: null,
       downloadStartedAt: null,
+      failedAtDownload: false,
     });
     await saveJobs();
     verifyKernel(old, makeClient());
@@ -687,6 +694,7 @@ async function retryColabJob(old) {
       error: null,
       finishedAt: null,
       downloadStartedAt: null,
+      failedAtDownload: false,
     });
     await saveJobs();
     return old;
@@ -700,6 +708,7 @@ async function retryColabJob(old) {
       error: null,
       finishedAt: null,
       downloadStartedAt: null,
+      failedAtDownload: false,
     });
     await saveJobs();
     return old;
@@ -707,15 +716,70 @@ async function retryColabJob(old) {
   return resubmit();
 }
 
-/** 手动重新取回：下载卡住（网络断开、图已在云端）时点一下，立刻再试一次
- * 下载，不重新生成、不换种子。重置 10 分钟下载上限的时钟：手动重取是一次
- * 新的尝试，不该因为之前卡了 9 分钟就 1 分钟后被判失败。 */
+/** 手动重新取回 / 重新下载：只重试“下载回存”这一步，不重新提交、不重新
+ * 生成、不换种子。
+ *  - downloading / running：老路（下载卡住时点一下，立刻再试一次下载）。
+ *  - failed 且 failedAtDownload：图已在云端生成完、只是 10 分钟内没下回来
+ *    （或密钥问题），先核对云端成品还在不在——在就只重试下载；kernel 已删
+ *    / 中转已没这单，就如实说取不回来了，并把「重新下载」按钮撤掉（标记清
+ *    掉，卡片只剩「重新提交」），不假装能重试。
+ *  - failed 且不是下载失败（生成失败、排队超时等）：拒绝，仍请点「重新提交」。
+ * 再失败也不判丢：下载失败时 finishJob/finishColabJob 仍留在 downloading，
+ * 10 分钟上限到了才再判失败、标记仍在，按钮保留可反复点。 */
 export async function refetchJob(id) {
   const job = jobs.find((j) => j.id === id);
   if (!job) throw new Error("找不到这条任务");
   if (job.status === "done") throw new Error("这张图已经下好了，不用重新取回");
-  if (job.status === "failed") throw new Error("这单已经失败了，请点「重新提交」再试");
-  if (job.status !== "downloading" && job.status !== "running") throw new Error("这单还没到下载这一步，稍后再试");
+  if (job.status === "failed") {
+    if (!job.failedAtDownload) throw new Error("这单已经失败了，请点「重新提交」再试");
+    // 失败在下载：先核对云端成品还在不在，免得对着已删的 kernel 空重试。
+    if (normalizeBackend(job.backend) === "colab") {
+      if (!job.colabJobId) throw new Error("中转那边已经没有这单了，取不回来，请点「重新提交」再试");
+      let remote;
+      try {
+        remote = await makeColabClient().getJob(job.colabJobId);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (e instanceof ColabError && e.status === 404) {
+          // 中转已清掉这单：成品取不回来了，如实说，按钮撤掉。
+          updateJob(job.id, {
+            failedAtDownload: false,
+            stageDetail: "中转那边已经没有这单了，成品取不回来。请点「重新提交」重新生成。",
+            error: "中转那边已经没有这单了，成品取不回来。请点「重新提交」重新生成。",
+          });
+          await saveJobs();
+          throw new Error("中转那边已经没有这单了，成品取不回来。请点「重新提交」重新生成。");
+        }
+        throw new Error(`现在查不到中转那边这单还在不在（${msg.slice(0, 80)}），请稍后再点「重新下载」`);
+      }
+      if (remote.status === "failed") {
+        throw new Error("中转那边这单已失败，成品取不回来，请点「重新提交」再试");
+      }
+      if (remote.status !== "done") {
+        throw new Error("中转那边这单还没跑完，稍后再点「重新下载」");
+      }
+      // done：成品在中转，往下走 Colab 重取那条路。
+    } else {
+      if (!job.kaggleRef) throw new Error("云端已经没有这单了，取不回来，请点「重新提交」再试");
+      const chk = await makeClient().confirmKernelExists(job.kaggleRef);
+      if (chk.authError) throw new Error(chk.authError);
+      if (chk.inconclusive) {
+        throw new Error("现在查不到云端这单还在不在（网络不通），请稍后再点「重新下载」");
+      }
+      if (!chk.exists) {
+        // kernel 已删/过期：成品取不回来了，如实说，按钮撤掉。
+        updateJob(job.id, {
+          failedAtDownload: false,
+          stageDetail: "云端已找不到这单任务（kernel 已被删掉），成品取不回来。请点「重新提交」重新生成。",
+          error: "云端已找不到这单任务（kernel 已被删掉），成品取不回来。请点「重新提交」重新生成。",
+        });
+        await saveJobs();
+        throw new Error("云端已找不到这单任务（kernel 已被删掉），成品取不回来。请点「重新提交」重新生成。");
+      }
+      // exists：kernel 还在，成品可取，往下走 Kaggle 重取那条路。
+    }
+  }
+  if (job.status !== "downloading" && job.status !== "running" && job.status !== "failed") throw new Error("这单还没到下载这一步，稍后再试");
   if (normalizeBackend(job.backend) === "colab") {
     if (!job.colabJobId) throw new Error("中转还没有这单，暂时取不回来");
     if (busyJobs.has(job.id)) throw new Error("正在下载，稍等一下");
@@ -727,6 +791,7 @@ export async function refetchJob(id) {
       downloadStartedAt: null,
       error: null,
       downloadStuck: null,
+      failedAtDownload: false,
     });
     await saveJobs();
     await finishColabJob(job);
@@ -742,6 +807,7 @@ export async function refetchJob(id) {
     downloadStartedAt: null,
     error: null,
     downloadStuck: null,
+    failedAtDownload: false,
   });
   await saveJobs();
   await finishJob(job);
@@ -977,6 +1043,25 @@ async function attachOrigInBackground(job, galleryId) {
   } catch (e) {
     await fail(e instanceof Error ? e.message : String(e));
   }
+}
+
+/** 画廊推送进度圈状态（纯函数，main.js 的图库渲染用；推送本身不改逻辑、
+ * 不自动推，这里只读状态）：
+ *  - "pushing"：推送进行中——调用方在推送循环里把任务 id 放进 pushing 集合，
+ *    推送完（无论成败）再拿出来；
+ *  - "ok"：已推送成功（任务记录 galleryPushed === true，pushJobToGallery 写回）；
+ *  - "error"：推送失败（galleryPushed === false；推送函数只在真正发过请求
+ *    且画廊回了不通过时才记 false，预检报错（没配密钥、图没完成）不记，
+ *    因为根本没推）；
+ *  - null：没推过 / 与推送无关。
+ * 叉号状态下重新推送入口不变：推送入口是图库选择模式的「推送到画廊」按
+ * 钮，与这个状态显示无关，出错了用户照常多选再推。 */
+export function galleryPushRingState(job, pushingJobIds) {
+  if (!job) return null;
+  if (pushingJobIds && pushingJobIds.has(job.id)) return "pushing";
+  if (job.galleryPushed === true) return "ok";
+  if (job.galleryPushed === false) return "error";
+  return null;
 }
 
 /** 手动推送到画廊（图库多选推送用）：读本机图片文件，按画廊设置推送，更新任务状态。
@@ -1219,11 +1304,14 @@ async function reinsertOrphanForDownload(orphan, discovered = null) {
 
 /** 后台跟踪的单在平台上失败/找不到了：插回一条失败任务进任务列表，
  * 让用户看得到（不静默丢掉），可以点「重新提交」再试。 */
-async function reinsertOrphanAsFailed(orphan, message) {
+async function reinsertOrphanAsFailed(orphan, message, failedAtDownload = false) {
   const job = jobFromOrphan(orphan, "failed", "failed");
   job.stageDetail = String(message).slice(0, 200);
   job.error = String(message).slice(0, 1000);
   job.finishedAt = Date.now();
+  // 后台取图超过 6 小时：失败在下载回存这一步，云端 kernel 还在（删任务时
+  // 没停 kernel），插回的失败任务同样可点「重新下载」只取回成品。
+  job.failedAtDownload = failedAtDownload;
   jobs.unshift(job);
   await saveJobs();
   await removeOrphan(orphan.id);
@@ -1239,7 +1327,7 @@ async function tickOrphans() {
     if (!orphans.some((o) => o.id === orphan.id) || busyJobs.has(orphan.id)) continue;
     try {
       if (Date.now() - orphan.createdAt > QUEUED_BACKSTOP_MS) {
-        await reinsertOrphanAsFailed(orphan, "后台取图超过 6 小时仍没拿到结果图，已自动结束。图库里没有这张图。");
+        await reinsertOrphanAsFailed(orphan, "后台取图超过 6 小时仍没拿到结果图，已自动结束。图库里没有这张图。", true);
         continue;
       }
       if (normalizeBackend(orphan.backend) === "colab") {
@@ -1973,9 +2061,10 @@ async function finishColabJob(job) {
         await saveJobs();
         return;
       }
-      // 密钥不对是明确拒绝，不用等 10 分钟上限
+      // 密钥不对是明确拒绝，不用等 10 分钟上限；记成下载失败（修好密钥后
+      // 点「重新下载」能接着取，成品还在中转）。
       if (e instanceof ColabError && e.status === 401) {
-        await failJob(job, msg);
+        await failJob(job, msg, { failedAtDownload: true });
         return;
       }
       // 404（结果还没准备好）或魔数不对：走老路下 PNG；PNG 也 404 就留在
@@ -2003,7 +2092,8 @@ async function finishColabJob(job) {
         return;
       }
       if (e instanceof ColabError && e.status === 401) {
-        await failJob(job, msg);
+        // 同 WebP 那条：密钥问题是下载失败，修好后可重新下载。
+        await failJob(job, msg, { failedAtDownload: true });
         return;
       }
       if (e instanceof ColabError && e.status === 404) {
@@ -2065,7 +2155,7 @@ async function finishColabJob(job) {
     // 下载失败先留在 downloading，下一轮再试；超过 10 分钟才判失败
     const since = current.downloadStartedAt || Date.now();
     if (Date.now() - since > DOWNLOAD_BACKSTOP_MS) {
-      await failJob(job, msg);
+      await failJob(job, msg, { failedAtDownload: true });
     } else {
       updateJob(job.id, {
         status: "downloading",
@@ -2303,7 +2393,7 @@ async function finishJob(job, discovered = null) {
     // 下载失败先留在 downloading，下一轮再试；超过 10 分钟才判失败
     const since = current.downloadStartedAt || Date.now();
     if (Date.now() - since > DOWNLOAD_BACKSTOP_MS) {
-      await failJob(job, msg);
+      await failJob(job, msg, { failedAtDownload: true });
     } else {
       updateJob(job.id, {
         status: "downloading",
@@ -2419,7 +2509,7 @@ async function recoverFailedColabJobs() {
     if (!current || current.status !== "failed") continue;
     if (remote.status === "done") {
       setNetworkDown(false);
-      updateJob(job.id, { stageDetail: "中转已跑完，正在取回结果图…", error: null });
+      updateJob(job.id, { stageDetail: "中转已跑完，正在取回结果图…", error: null, failedAtDownload: false });
       await saveJobs();
       await finishColabJob(job);
       continue;
@@ -2556,7 +2646,14 @@ async function tick() {
         // 10 分钟上限也不判它（用户可能几小时后才点）。
         if (job.downloadStuck) continue;
         if (job.downloadStartedAt && now - job.downloadStartedAt > DOWNLOAD_BACKSTOP_MS) {
-          await failJob(job, "下载回存重试超过 10 分钟仍没成功，已自动结束。可以点「重新提交」再试。");
+          // 失败在下载回存：图已在云端生成完，kernel 没被删（failJob 不删
+          // kernel），成品还能取回——记 failedAtDownload，卡片上给「重新下载」
+          // 按钮，只重试下载、不重新生成。不要再只给「重新提交」。
+          await failJob(
+            job,
+            "下载回存重试超过 10 分钟仍没成功，已自动结束。图已在云端生成完，点「重新下载」只取回成品，不用重新生成；也可以点「重新提交」再试。",
+            { failedAtDownload: true },
+          );
           continue;
         }
         if (normalizeBackend(job.backend) === "colab") {

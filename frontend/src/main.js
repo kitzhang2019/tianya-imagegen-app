@@ -24,6 +24,7 @@ import {
   STAGE_LABELS,
   deleteJob,
   ensureThumbnails,
+  galleryPushRingState,
   getAdminPassword,
   getImageSrc,
   getJobProgress,
@@ -356,6 +357,20 @@ let currentResultJobId = null;
 let currentTab = "generate";
 let gallerySelectMode = false;
 const selectedGalleryIds = new Set();
+// 画廊推送进度圈：正在推送的任务 id 集合（推送循环里逐张加、逐张删；
+// 成功/失败的持久状态读任务记录的 galleryPushed，见 galleryPushRingState）。
+const pushingGalleryIds = new Set();
+
+/** 画廊推送进度圈 HTML：推送中转圈、成功圈里 ✓、失败圈里 ✗；没推过返回空。
+ * inline=true 时是详情页行内小圈（跟在状态文字前面），否则是图库瓦片右上角
+ * 的浮圈（删除按钮下方，与左侧用时角标对称，不挡重新生成/删除按钮）。 */
+function pushRingHtml(job, inline = false) {
+  const state = galleryPushRingState(job, pushingGalleryIds);
+  if (!state) return "";
+  const label = state === "pushing" ? "正在推送到画廊" : state === "ok" ? "已推送到画廊" : "画廊推送失败";
+  const mark = state === "ok" ? "✓" : state === "error" ? "✗" : "";
+  return `<span class="g-push-ring ${state}${inline ? " inline" : ""}" aria-label="${label}">${mark}</span>`;
+}
 
 function esc(s) {
   return String(s ?? "")
@@ -457,6 +472,7 @@ function jobItemHtml(job) {
         <div class="job-actions">
           ${done && src ? `<button type="button" class="thumb-btn" data-view="${job.id}"><img src="${esc(src)}" alt="结果图" loading="lazy" /></button>` : ""}
           ${failed ? `<button type="button" class="mini-btn" data-retry="${job.id}">重新提交</button>` : ""}
+          ${failed && job.failedAtDownload ? `<button type="button" class="mini-btn primary" data-redownload="${job.id}">重新下载</button>` : ""}
           ${job.status === "downloading" ? `<button type="button" class="mini-btn" data-refetch="${job.id}">重新取回</button>` : ""}
           <button type="button" class="mini-btn danger" data-delete="${job.id}">删除</button>
         </div>
@@ -535,6 +551,7 @@ function renderGallery() {
       return `<figure class="g-tile${gallerySelectMode ? " select-mode" : ""}${selected ? " selected" : ""}" data-id="${job.id}">
         <img src="${esc(src)}" alt="${esc(MODEL_LABELS[job.model] ?? job.model)} 生成图" loading="lazy" data-view="${job.id}" />
         ${dur ? `<span class="g-duration">${esc(dur)}</span>` : ""}
+        ${pushRingHtml(job)}
         <figcaption class="g-meta" data-view="${job.id}">
           <span class="g-model">${MODEL_LABELS[job.model] ?? job.model}</span>
           <span class="g-size">${outputSizeForJob(job).width}×${outputSizeForJob(job).height}</span>
@@ -661,10 +678,13 @@ function openResult(jobId) {
   $("result-title").textContent = `${MODEL_LABELS[job.model] ?? job.model} · ${outputSizeForJob(job).width}×${outputSizeForJob(job).height}`;
   $("result-meta").textContent = `种子 ${job.seed} · ${new Date(job.finishedAt || job.createdAt).toLocaleString()}`;
   const g = $("result-gallery");
+  const ring = pushRingHtml(job, true);
   if (job.galleryPushed === true) {
-    g.innerHTML = `<span class="ok">✓ 已推送到天涯画廊</span>`;
+    g.innerHTML = `${ring}<span class="ok">✓ 已推送到天涯画廊</span>`;
   } else if (job.galleryPushed === false) {
-    g.innerHTML = `<span class="warn">画廊推送失败：${esc(job.galleryError || "未知原因")}（图已保存在本机）</span>`;
+    g.innerHTML = `${ring}<span class="warn">画廊推送失败：${esc(job.galleryError || "未知原因")}（图已保存在本机）</span>`;
+  } else if (pushingGalleryIds.has(job.id)) {
+    g.innerHTML = `${ring}<span>正在推送到画廊…</span>`;
   } else {
     g.textContent = "图已保存在本机。";
   }
@@ -979,6 +999,21 @@ async function handleJobListClick(e) {
     }
     return;
   }
+  // 「重新下载」：失败在下载回存的任务点它，只重试下载同一份云端成品，
+  // 不重新提交、不重新生成；点完任务回到下载中，进度环显示 95%「下载回存」。
+  const redownloadBtn = e.target.closest("[data-redownload]");
+  if (redownloadBtn) {
+    redownloadBtn.disabled = true;
+    try {
+      const redownloadedId = Number(redownloadBtn.dataset.redownload);
+      await refetchJob(redownloadedId);
+      const after = getJobs().find((j) => j.id === redownloadedId);
+      toast(after?.status === "done" ? "已下载回存，图片已保存" : "已重新尝试下载，网络恢复后继续下载");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err));
+    }
+    return;
+  }
   const delBtn = e.target.closest("[data-delete]");
   if (delBtn) {
     if (!window.confirm("确定删除这条任务吗？已保存的图片文件也会一起删掉。")) return;
@@ -1085,6 +1120,10 @@ $("btn-gallery-push").addEventListener("click", async () => {
   let fail = 0;
   let lastError = "";
   for (const id of ids) {
+    // 进度圈：这张正在推（转圈），推完（成败都）再拿出来，环按任务记录显示 ✓/✗；
+    // 每步重绘图库，环逐张转起来；出错不中断后面几张。
+    pushingGalleryIds.add(id);
+    renderGallery();
     try {
       const res = await pushJobToGallery(id);
       if (res.ok) ok++;
@@ -1095,7 +1134,10 @@ $("btn-gallery-push").addEventListener("click", async () => {
     } catch (err) {
       fail++;
       lastError = err instanceof Error ? err.message : String(err);
+    } finally {
+      pushingGalleryIds.delete(id);
     }
+    renderGallery();
   }
   btn.disabled = false;
   btn.textContent = "推送到画廊";

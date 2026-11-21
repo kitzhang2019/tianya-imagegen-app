@@ -781,6 +781,54 @@ textarea {
   white-space: nowrap;
 }
 
+/* 画廊推送进度圈（v1.2.28）：瓦片右上角、删除按钮下方（与左侧用时角标对称），
+   不挡重新生成/删除按钮；推送中转圈、成功圈里打 ✓、失败圈里打 ✗。
+   只做状态显示，不改推送逻辑；详情页用行内小圈（.inline），跟在状态文字前面。 */
+.g-push-ring {
+  position: absolute;
+  top: 46px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(11, 15, 25, 0.55);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border: 2px solid rgba(255, 255, 255, 0.7);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  pointer-events: none;
+}
+.g-push-ring.pushing {
+  border-top-color: transparent;
+  animation: g-push-spin 0.8s linear infinite;
+}
+.g-push-ring.ok {
+  border-color: #4ade80;
+  color: #4ade80;
+}
+.g-push-ring.error {
+  border-color: #f87171;
+  color: #f87171;
+}
+@keyframes g-push-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.g-push-ring.inline {
+  position: static;
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  font-size: 12px;
+  vertical-align: -4px;
+  margin-right: 6px;
+}
+
 .g-meta {
   position: absolute;
   left: 0;
